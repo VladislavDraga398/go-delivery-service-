@@ -8,11 +8,13 @@ import (
 
 // Config представляет конфигурацию приложения
 type Config struct {
-	Server   ServerConfig   `json:"server"`
-	Database DatabaseConfig `json:"database"`
-	Redis    RedisConfig    `json:"redis"`
-	Kafka    KafkaConfig    `json:"kafka"`
-	Logger   LoggerConfig   `json:"logger"`
+	Server    ServerConfig    `json:"server"`
+	Database  DatabaseConfig  `json:"database"`
+	Redis     RedisConfig     `json:"redis"`
+	Kafka     KafkaConfig     `json:"kafka"`
+	Logger    LoggerConfig    `json:"logger"`
+	Geocoding GeocodingConfig `json:"geocoding"`
+	Pricing   PricingConfig   `json:"pricing"`
 }
 
 // ServerConfig представляет конфигурацию HTTP сервера
@@ -62,6 +64,21 @@ type LoggerConfig struct {
 	File   string `json:"file"`
 }
 
+// GeocodingConfig описывает настройки геокодера
+type GeocodingConfig struct {
+	Provider       string `json:"provider"`        // offline | yandex
+	YandexAPIKey   string `json:"yandex_api_key"`  // ключ для Yandex геокодера
+	YandexBaseURL  string `json:"yandex_base_url"` // https://geocode-maps.yandex.ru/1.x
+	TimeoutSeconds int    `json:"timeout_seconds"` // таймаут http-запроса
+}
+
+// PricingConfig хранит тарифы для доставки
+type PricingConfig struct {
+	BaseFare float64 `json:"base_fare"`
+	PerKm    float64 `json:"per_km"`
+	MinFare  float64 `json:"min_fare"`
+}
+
 // Load загружает конфигурацию из переменных окружения
 func Load() *Config {
 	return &Config{
@@ -99,6 +116,17 @@ func Load() *Config {
 			Format: getEnv("LOG_FORMAT", "json"),
 			File:   getEnv("LOG_FILE", ""),
 		},
+		Geocoding: GeocodingConfig{
+			Provider:       getEnv("GEOCODER_PROVIDER", "offline"),
+			YandexAPIKey:   getEnv("YANDEX_GEOCODER_API_KEY", ""),
+			YandexBaseURL:  getEnv("YANDEX_GEOCODER_BASE_URL", "https://geocode-maps.yandex.ru/1.x"),
+			TimeoutSeconds: getEnvAsInt("GEOCODER_TIMEOUT_SECONDS", 5),
+		},
+		Pricing: PricingConfig{
+			BaseFare: getEnvAsFloat("PRICING_BASE_FARE", 100.0),
+			PerKm:    getEnvAsFloat("PRICING_PER_KM", 20.0),
+			MinFare:  getEnvAsFloat("PRICING_MIN_FARE", 150.0),
+		},
 	}
 }
 
@@ -114,6 +142,15 @@ func getEnv(key, defaultValue string) string {
 func getEnvAsInt(key string, defaultValue int) int {
 	valueStr := getEnv(key, "")
 	if value, err := strconv.Atoi(valueStr); err == nil {
+		return value
+	}
+	return defaultValue
+}
+
+// getEnvAsFloat получает значение переменной окружения как float64 с значением по умолчанию
+func getEnvAsFloat(key string, defaultValue float64) float64 {
+	valueStr := getEnv(key, "")
+	if value, err := strconv.ParseFloat(valueStr, 64); err == nil {
 		return value
 	}
 	return defaultValue

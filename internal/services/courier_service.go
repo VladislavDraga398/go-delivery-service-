@@ -29,21 +29,23 @@ func NewCourierService(db *database.DB, log *logger.Logger) *CourierService {
 // CreateCourier создает нового курьера
 func (s *CourierService) CreateCourier(req *models.CreateCourierRequest) (*models.Courier, error) {
 	courier := &models.Courier{
-		ID:        uuid.New(),
-		Name:      req.Name,
-		Phone:     req.Phone,
-		Status:    models.CourierStatusOffline,
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
+		ID:           uuid.New(),
+		Name:         req.Name,
+		Phone:        req.Phone,
+		Status:       models.CourierStatusOffline,
+		Rating:       0.0,
+		TotalReviews: 0,
+		CreatedAt:    time.Now(),
+		UpdatedAt:    time.Now(),
 	}
 
 	query := `
-		INSERT INTO couriers (id, name, phone, status, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO couriers (id, name, phone, status, rating, total_reviews, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 	`
 
 	_, err := s.db.Exec(query, courier.ID, courier.Name, courier.Phone,
-		courier.Status, courier.CreatedAt, courier.UpdatedAt)
+		courier.Status, courier.Rating, courier.TotalReviews, courier.CreatedAt, courier.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create courier: %w", err)
 	}
@@ -62,7 +64,7 @@ func (s *CourierService) GetCourier(courierID uuid.UUID) (*models.Courier, error
 	courier := &models.Courier{}
 
 	query := `
-		SELECT id, name, phone, status, current_lat, current_lon, 
+		SELECT id, name, phone, status, current_lat, current_lon, rating, total_reviews,
 		       created_at, updated_at, last_seen_at
 		FROM couriers 
 		WHERE id = $1
@@ -70,8 +72,8 @@ func (s *CourierService) GetCourier(courierID uuid.UUID) (*models.Courier, error
 
 	err := s.db.QueryRow(query, courierID).Scan(
 		&courier.ID, &courier.Name, &courier.Phone, &courier.Status,
-		&courier.CurrentLat, &courier.CurrentLon, &courier.CreatedAt,
-		&courier.UpdatedAt, &courier.LastSeenAt,
+		&courier.CurrentLat, &courier.CurrentLon, &courier.Rating, &courier.TotalReviews,
+		&courier.CreatedAt, &courier.UpdatedAt, &courier.LastSeenAt,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -117,9 +119,9 @@ func (s *CourierService) UpdateCourierStatus(courierID uuid.UUID, req *models.Up
 }
 
 // GetCouriers получает список курьеров с фильтрацией
-func (s *CourierService) GetCouriers(status *models.CourierStatus, limit, offset int) ([]*models.Courier, error) {
+func (s *CourierService) GetCouriers(status *models.CourierStatus, minRating *float64, limit, offset int, orderBy string) ([]*models.Courier, error) {
 	query := `
-		SELECT id, name, phone, status, current_lat, current_lon, 
+		SELECT id, name, phone, status, current_lat, current_lon, rating, total_reviews,
 		       created_at, updated_at, last_seen_at
 		FROM couriers 
 		WHERE 1=1
@@ -133,7 +135,19 @@ func (s *CourierService) GetCouriers(status *models.CourierStatus, limit, offset
 		argIndex++
 	}
 
-	query += " ORDER BY created_at DESC"
+	if minRating != nil {
+		query += fmt.Sprintf(" AND rating >= $%d", argIndex)
+		args = append(args, *minRating)
+		argIndex++
+	}
+
+	// Сортировка
+	switch orderBy {
+	case "rating":
+		query += " ORDER BY rating DESC, total_reviews DESC, created_at DESC"
+	default:
+		query += " ORDER BY created_at DESC"
+	}
 
 	if limit > 0 {
 		query += fmt.Sprintf(" LIMIT $%d", argIndex)
@@ -156,8 +170,8 @@ func (s *CourierService) GetCouriers(status *models.CourierStatus, limit, offset
 	for rows.Next() {
 		courier := &models.Courier{}
 		if err := rows.Scan(&courier.ID, &courier.Name, &courier.Phone, &courier.Status,
-			&courier.CurrentLat, &courier.CurrentLon, &courier.CreatedAt,
-			&courier.UpdatedAt, &courier.LastSeenAt); err != nil {
+			&courier.CurrentLat, &courier.CurrentLon, &courier.Rating, &courier.TotalReviews,
+			&courier.CreatedAt, &courier.UpdatedAt, &courier.LastSeenAt); err != nil {
 			return nil, fmt.Errorf("failed to scan courier: %w", err)
 		}
 		couriers = append(couriers, courier)
@@ -169,7 +183,7 @@ func (s *CourierService) GetCouriers(status *models.CourierStatus, limit, offset
 // GetAvailableCouriers получает список доступных курьеров
 func (s *CourierService) GetAvailableCouriers() ([]*models.Courier, error) {
 	status := models.CourierStatusAvailable
-	return s.GetCouriers(&status, 0, 0)
+	return s.GetCouriers(&status, nil, 0, 0, "created_at")
 }
 
 // AssignOrderToCourier назначает заказ курьеру

@@ -18,19 +18,23 @@ import (
 
 // OrderHandler представляет обработчик заказов
 type OrderHandler struct {
-	orderService *services.OrderService
-	producer     *kafka.Producer
-	redisClient  *redis.Client
-	log          *logger.Logger
+	orderService      *services.OrderService
+	assignmentService *services.CourierAssignmentService
+	geocodingService  *services.GeocodingService
+	producer          *kafka.Producer
+	redisClient       *redis.Client
+	log               *logger.Logger
 }
 
 // NewOrderHandler создает новый обработчик заказов
-func NewOrderHandler(orderService *services.OrderService, producer *kafka.Producer, redisClient *redis.Client, log *logger.Logger) *OrderHandler {
+func NewOrderHandler(orderService *services.OrderService, assignmentService *services.CourierAssignmentService, geocodingService *services.GeocodingService, producer *kafka.Producer, redisClient *redis.Client, log *logger.Logger) *OrderHandler {
 	return &OrderHandler{
-		orderService: orderService,
-		producer:     producer,
-		redisClient:  redisClient,
-		log:          log,
+		orderService:      orderService,
+		assignmentService: assignmentService,
+		geocodingService:  geocodingService,
+		producer:          producer,
+		redisClient:       redisClient,
+		log:               log,
 	}
 }
 
@@ -51,6 +55,27 @@ func (h *OrderHandler) CreateOrder(w http.ResponseWriter, r *http.Request) {
 	if err := h.validateCreateOrderRequest(&req); err != nil {
 		writeErrorResponse(w, http.StatusBadRequest, err.Error())
 		return
+	}
+
+	// Если координаты не переданы, пытаемся геокодировать адреса
+	if req.PickupLat == nil || req.PickupLon == nil {
+		lat, lon, err := h.geocodingService.Geocode(r.Context(), req.PickupAddress)
+		if err != nil {
+			writeErrorResponse(w, http.StatusBadRequest, "Failed to geocode pickup address")
+			return
+		}
+		req.PickupLat = &lat
+		req.PickupLon = &lon
+	}
+
+	if req.DeliveryLat == nil || req.DeliveryLon == nil {
+		lat, lon, err := h.geocodingService.Geocode(r.Context(), req.DeliveryAddress)
+		if err != nil {
+			writeErrorResponse(w, http.StatusBadRequest, "Failed to geocode delivery address")
+			return
+		}
+		req.DeliveryLat = &lat
+		req.DeliveryLon = &lon
 	}
 
 	// Создание заказа
@@ -74,7 +99,44 @@ func (h *OrderHandler) CreateOrder(w http.ResponseWriter, r *http.Request) {
 		// Не возвращаем ошибку клиенту
 	}
 
+	// Опциональное автоназначение курьера сразу после создания заказа
+	var assignedCourier *models.Courier
+	if req.AutoAssign {
+		courier, err := h.assignmentService.AutoAssignCourier(order.ID, *req.DeliveryLat, *req.DeliveryLon)
+		if err != nil {
+			h.log.WithError(err).WithField("order_id", order.ID).Warn("Auto-assign failed after order creation")
+		} else {
+			assignedCourier = courier
+
+			// Обновляем заказ из БД, чтобы вернуть актуальный статус/курьера
+			updatedOrder, getErr := h.orderService.GetOrder(order.ID)
+			if getErr == nil {
+				order = updatedOrder
+			} else {
+				h.log.WithError(getErr).WithField("order_id", order.ID).Warn("Failed to reload order after auto-assign")
+			}
+
+			// Инвалидация кешей
+			h.redisClient.Delete(r.Context(), cacheKey)
+			courierCacheKey := redis.GenerateKey(redis.KeyPrefixCourier, courier.ID.String())
+			h.redisClient.Delete(r.Context(), courierCacheKey)
+		}
+	}
+
 	h.log.WithField("order_id", order.ID).Info("Order created successfully")
+
+	// Формируем ответ: сохраняем обратную совместимость (возвращаем заказ), но при автоназначении добавляем доп. поля
+	if req.AutoAssign {
+		response := map[string]interface{}{
+			"order": order,
+		}
+		if assignedCourier != nil {
+			response["assigned_courier"] = assignedCourier
+		}
+		writeJSONResponse(w, http.StatusCreated, response)
+		return
+	}
+
 	writeJSONResponse(w, http.StatusCreated, order)
 }
 
@@ -228,6 +290,50 @@ func (h *OrderHandler) GetOrders(w http.ResponseWriter, r *http.Request) {
 	writeJSONResponse(w, http.StatusOK, orders)
 }
 
+// CreateReview создает отзыв по доставленному заказу
+func (h *OrderHandler) CreateReview(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErrorResponse(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	orderID, err := extractUUIDFromPath(r.URL.Path, "/api/orders/")
+	if err != nil {
+		writeErrorResponse(w, http.StatusBadRequest, "Invalid order ID")
+		return
+	}
+
+	var req models.CreateReviewRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErrorResponse(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	review, err := h.orderService.CreateReview(orderID, &req)
+	if err != nil {
+		switch {
+		case strings.Contains(err.Error(), "not found"):
+			writeErrorResponse(w, http.StatusNotFound, err.Error())
+		case strings.Contains(err.Error(), "not delivered") || strings.Contains(err.Error(), "no assigned") || strings.Contains(err.Error(), "already exists") || strings.Contains(err.Error(), "between 1 and 5"):
+			writeErrorResponse(w, http.StatusBadRequest, err.Error())
+		default:
+			h.log.WithError(err).Error("Failed to create review")
+			writeErrorResponse(w, http.StatusInternalServerError, "Failed to create review")
+		}
+		return
+	}
+
+	// Инвалидация кеша заказа
+	cacheKey := redis.GenerateKey(redis.KeyPrefixOrder, orderID.String())
+	h.redisClient.Delete(r.Context(), cacheKey)
+
+	// Инвалидация кеша курьера
+	courierCacheKey := redis.GenerateKey(redis.KeyPrefixCourier, review.CourierID.String())
+	h.redisClient.Delete(r.Context(), courierCacheKey)
+
+	writeJSONResponse(w, http.StatusCreated, review)
+}
+
 // validateCreateOrderRequest валидирует запрос на создание заказа
 func (h *OrderHandler) validateCreateOrderRequest(req *models.CreateOrderRequest) error {
 	if req.CustomerName == "" {
@@ -238,6 +344,9 @@ func (h *OrderHandler) validateCreateOrderRequest(req *models.CreateOrderRequest
 	}
 	if req.DeliveryAddress == "" {
 		return fmt.Errorf("delivery address is required")
+	}
+	if req.PickupAddress == "" {
+		return fmt.Errorf("pickup address is required")
 	}
 	if len(req.Items) == 0 {
 		return fmt.Errorf("order items are required")
@@ -255,5 +364,94 @@ func (h *OrderHandler) validateCreateOrderRequest(req *models.CreateOrderRequest
 		}
 	}
 
+	// Координаты: если указаны, валидируем; если нет — будут геокодированы позже
+	if req.PickupLat != nil {
+		if *req.PickupLat < -90 || *req.PickupLat > 90 {
+			return fmt.Errorf("pickup_lat must be between -90 and 90")
+		}
+	}
+	if req.PickupLon != nil {
+		if *req.PickupLon < -180 || *req.PickupLon > 180 {
+			return fmt.Errorf("pickup_lon must be between -180 and 180")
+		}
+	}
+	if req.DeliveryLat != nil {
+		if *req.DeliveryLat < -90 || *req.DeliveryLat > 90 {
+			return fmt.Errorf("delivery_lat must be between -90 and 90")
+		}
+	}
+	if req.DeliveryLon != nil {
+		if *req.DeliveryLon < -180 || *req.DeliveryLon > 180 {
+			return fmt.Errorf("delivery_lon must be between -180 and 180")
+		}
+	}
+
+	// Проверка координат для автоназначения
+	if req.AutoAssign {
+		// координаты уже проверены выше
+	}
+
 	return nil
+}
+
+// AutoAssignCourierRequest представляет запрос на автоназначение курьера
+type AutoAssignCourierRequest struct {
+	DeliveryLat float64 `json:"delivery_lat"`
+	DeliveryLon float64 `json:"delivery_lon"`
+}
+
+// AutoAssignCourier автоматически назначает оптимального курьера на заказ
+func (h *OrderHandler) AutoAssignCourier(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErrorResponse(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	orderID, err := extractUUIDFromPath(r.URL.Path, "/api/orders/")
+	if err != nil {
+		writeErrorResponse(w, http.StatusBadRequest, "Invalid order ID")
+		return
+	}
+
+	var req AutoAssignCourierRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErrorResponse(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	// Валидация координат
+	if req.DeliveryLat < -90 || req.DeliveryLat > 90 {
+		writeErrorResponse(w, http.StatusBadRequest, "Invalid delivery latitude")
+		return
+	}
+	if req.DeliveryLon < -180 || req.DeliveryLon > 180 {
+		writeErrorResponse(w, http.StatusBadRequest, "Invalid delivery longitude")
+		return
+	}
+
+	// Автоматическое назначение курьера
+	courier, err := h.assignmentService.AutoAssignCourier(orderID, req.DeliveryLat, req.DeliveryLon)
+	if err != nil {
+		switch {
+		case strings.Contains(err.Error(), "not found"):
+			writeErrorResponse(w, http.StatusNotFound, err.Error())
+		case strings.Contains(err.Error(), "not in 'created' status") || strings.Contains(err.Error(), "already has assigned") || strings.Contains(err.Error(), "no available couriers") || strings.Contains(err.Error(), "no couriers with known location"):
+			writeErrorResponse(w, http.StatusBadRequest, err.Error())
+		default:
+			h.log.WithError(err).Error("Failed to auto-assign courier")
+			writeErrorResponse(w, http.StatusInternalServerError, "Failed to auto-assign courier")
+		}
+		return
+	}
+
+	// Инвалидация кеша заказа
+	cacheKey := redis.GenerateKey(redis.KeyPrefixOrder, orderID.String())
+	h.redisClient.Delete(r.Context(), cacheKey)
+
+	// Инвалидация кеша курьера
+	courierCacheKey := redis.GenerateKey(redis.KeyPrefixCourier, courier.ID.String())
+	h.redisClient.Delete(r.Context(), courierCacheKey)
+
+	h.log.WithField("order_id", orderID).WithField("courier_id", courier.ID).Info("Courier auto-assigned successfully")
+	writeJSONResponse(w, http.StatusOK, courier)
 }

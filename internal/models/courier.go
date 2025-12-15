@@ -17,15 +17,17 @@ const (
 
 // Courier представляет курьера в системе
 type Courier struct {
-	ID         uuid.UUID     `json:"id" db:"id"`
-	Name       string        `json:"name" db:"name"`
-	Phone      string        `json:"phone" db:"phone"`
-	Status     CourierStatus `json:"status" db:"status"`
-	CurrentLat *float64      `json:"current_lat,omitempty" db:"current_lat"`
-	CurrentLon *float64      `json:"current_lon,omitempty" db:"current_lon"`
-	CreatedAt  time.Time     `json:"created_at" db:"created_at"`
-	UpdatedAt  time.Time     `json:"updated_at" db:"updated_at"`
-	LastSeenAt *time.Time    `json:"last_seen_at,omitempty" db:"last_seen_at"`
+	ID           uuid.UUID     `json:"id" db:"id"`
+	Name         string        `json:"name" db:"name"`
+	Phone        string        `json:"phone" db:"phone"`
+	Status       CourierStatus `json:"status" db:"status"`
+	CurrentLat   *float64      `json:"current_lat,omitempty" db:"current_lat"`
+	CurrentLon   *float64      `json:"current_lon,omitempty" db:"current_lon"`
+	Rating       float64       `json:"rating" db:"rating"`
+	TotalReviews int           `json:"total_reviews" db:"total_reviews"`
+	CreatedAt    time.Time     `json:"created_at" db:"created_at"`
+	UpdatedAt    time.Time     `json:"updated_at" db:"updated_at"`
+	LastSeenAt   *time.Time    `json:"last_seen_at,omitempty" db:"last_seen_at"`
 }
 
 // CreateCourierRequest представляет запрос на создание курьера

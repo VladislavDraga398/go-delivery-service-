@@ -19,15 +19,17 @@ import (
 // CourierHandler представляет обработчик курьеров
 type CourierHandler struct {
 	courierService *services.CourierService
+	orderService   *services.OrderService
 	producer       *kafka.Producer
 	redisClient    *redis.Client
 	log            *logger.Logger
 }
 
 // NewCourierHandler создает новый обработчик курьеров
-func NewCourierHandler(courierService *services.CourierService, producer *kafka.Producer, redisClient *redis.Client, log *logger.Logger) *CourierHandler {
+func NewCourierHandler(courierService *services.CourierService, orderService *services.OrderService, producer *kafka.Producer, redisClient *redis.Client, log *logger.Logger) *CourierHandler {
 	return &CourierHandler{
 		courierService: courierService,
+		orderService:   orderService,
 		producer:       producer,
 		redisClient:    redisClient,
 		log:            log,
@@ -194,6 +196,28 @@ func (h *CourierHandler) GetCouriers(w http.ResponseWriter, r *http.Request) {
 		status = &s
 	}
 
+	var minRating *float64
+	if ratingStr := query.Get("min_rating"); ratingStr != "" {
+		if val, err := strconv.ParseFloat(ratingStr, 64); err == nil && val >= 0 && val <= 5 {
+			minRating = &val
+		} else {
+			writeErrorResponse(w, http.StatusBadRequest, "Invalid min_rating")
+			return
+		}
+	}
+
+	// Сортировка (по умолчанию — по дате создания)
+	orderBy := "created_at"
+	if orderByStr := query.Get("order_by"); orderByStr != "" {
+		switch orderByStr {
+		case "created_at", "rating":
+			orderBy = orderByStr
+		default:
+			writeErrorResponse(w, http.StatusBadRequest, "Invalid order_by")
+			return
+		}
+	}
+
 	limit := 50 // По умолчанию
 	if limitStr := query.Get("limit"); limitStr != "" {
 		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 && l <= 100 {
@@ -208,7 +232,7 @@ func (h *CourierHandler) GetCouriers(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	couriers, err := h.courierService.GetCouriers(status, limit, offset)
+	couriers, err := h.courierService.GetCouriers(status, minRating, limit, offset, orderBy)
 	if err != nil {
 		h.log.WithError(err).Error("Failed to get couriers")
 		writeErrorResponse(w, http.StatusInternalServerError, "Failed to get couriers")
@@ -233,6 +257,44 @@ func (h *CourierHandler) GetAvailableCouriers(w http.ResponseWriter, r *http.Req
 	}
 
 	writeJSONResponse(w, http.StatusOK, couriers)
+}
+
+// GetCourierReviews возвращает отзывы по курьеру
+func (h *CourierHandler) GetCourierReviews(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeErrorResponse(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	courierID, err := extractUUIDFromPath(r.URL.Path, "/api/couriers/")
+	if err != nil {
+		writeErrorResponse(w, http.StatusBadRequest, "Invalid courier ID")
+		return
+	}
+
+	query := r.URL.Query()
+	limit := 50
+	if limitStr := query.Get("limit"); limitStr != "" {
+		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 && l <= 100 {
+			limit = l
+		}
+	}
+
+	offset := 0
+	if offsetStr := query.Get("offset"); offsetStr != "" {
+		if o, err := strconv.Atoi(offsetStr); err == nil && o >= 0 {
+			offset = o
+		}
+	}
+
+	reviews, err := h.orderService.GetCourierReviews(courierID, limit, offset)
+	if err != nil {
+		h.log.WithError(err).Error("Failed to get courier reviews")
+		writeErrorResponse(w, http.StatusInternalServerError, "Failed to get courier reviews")
+		return
+	}
+
+	writeJSONResponse(w, http.StatusOK, reviews)
 }
 
 // AssignOrderToCourier назначает заказ курьеру

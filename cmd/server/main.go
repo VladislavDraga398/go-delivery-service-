@@ -56,13 +56,18 @@ func main() {
 	}
 	defer consumer.Stop()
 
+	// Тарифы доставки
+	pricingService := services.NewPricingService(cfg.Pricing.BaseFare, cfg.Pricing.PerKm, cfg.Pricing.MinFare)
+
 	// Инициализация сервисов
-	orderService := services.NewOrderService(db, log)
+	orderService := services.NewOrderService(db, log, pricingService)
 	courierService := services.NewCourierService(db, log)
+	assignmentService := services.NewCourierAssignmentService(db, courierService, orderService, log)
+	geocodingService := services.NewGeocodingService(redisClient, log, &cfg.Geocoding)
 
 	// Инициализация handlers
-	orderHandler := handlers.NewOrderHandler(orderService, producer, redisClient, log)
-	courierHandler := handlers.NewCourierHandler(courierService, producer, redisClient, log)
+	orderHandler := handlers.NewOrderHandler(orderService, assignmentService, geocodingService, producer, redisClient, log)
+	courierHandler := handlers.NewCourierHandler(courierService, orderService, producer, redisClient, log)
 	healthHandler := handlers.NewHealthHandler(db, redisClient)
 
 	// Регистрация обработчиков событий Kafka
@@ -155,6 +160,20 @@ func handleOrderRoute(handler *handlers.OrderHandler) http.HandlerFunc {
 			} else {
 				writeErrorResponse(w, http.StatusMethodNotAllowed, "Method not allowed")
 			}
+		} else if strings.HasSuffix(r.URL.Path, "/review") {
+			// Создание отзыва по заказу
+			if r.Method == http.MethodPost {
+				handler.CreateReview(w, r)
+			} else {
+				writeErrorResponse(w, http.StatusMethodNotAllowed, "Method not allowed")
+			}
+		} else if strings.HasSuffix(r.URL.Path, "/auto-assign") {
+			// Автоназначение курьера на заказ
+			if r.Method == http.MethodPost {
+				handler.AutoAssignCourier(w, r)
+			} else {
+				writeErrorResponse(w, http.StatusMethodNotAllowed, "Method not allowed")
+			}
 		} else {
 			// Получение заказа по ID
 			if r.Method == http.MethodGet {
@@ -194,6 +213,13 @@ func handleCourierRoute(handler *handlers.CourierHandler) http.HandlerFunc {
 			// Назначение заказа курьеру
 			if r.Method == http.MethodPost {
 				handler.AssignOrderToCourier(w, r)
+			} else {
+				writeErrorResponse(w, http.StatusMethodNotAllowed, "Method not allowed")
+			}
+		} else if strings.HasSuffix(r.URL.Path, "/reviews") {
+			// Получение отзывов курьера
+			if r.Method == http.MethodGet {
+				handler.GetCourierReviews(w, r)
 			} else {
 				writeErrorResponse(w, http.StatusMethodNotAllowed, "Method not allowed")
 			}

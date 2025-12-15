@@ -45,6 +45,7 @@ docker-run:
 	@docker run -p 8080:8080 $(DOCKER_IMAGE):$(VERSION)
 
 # Docker Compose команды
+
 up:
 	@echo "Starting all services..."
 	@docker-compose up -d
