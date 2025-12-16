@@ -33,7 +33,7 @@ func TestCourierAssignmentService_CalculateCourierScore(t *testing.T) {
 	defer db.Close()
 
 	log := newTestLogger()
-	orderService := NewOrderService(db, log, newTestPricingService())
+	orderService := NewOrderService(db, log, newTestPricingService(), nil)
 	courierService := NewCourierService(db, log)
 	assignmentService := NewCourierAssignmentService(db, courierService, orderService, log)
 

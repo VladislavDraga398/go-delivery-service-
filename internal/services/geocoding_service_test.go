@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -18,6 +19,9 @@ import (
 func newTestRedis(t *testing.T) *redis.Client {
 	mr, err := miniredis.Run()
 	if err != nil {
+		if strings.Contains(err.Error(), "operation not permitted") {
+			t.Skipf("skip: cannot start miniredis in this environment: %v", err)
+		}
 		t.Fatalf("failed to start miniredis: %v", err)
 	}
 	t.Cleanup(mr.Close)
@@ -71,10 +75,20 @@ func TestGeocodingService_Geocode_CachesResult(t *testing.T) {
 
 func TestGeocodingService_YandexProvider(t *testing.T) {
 	// Mock Yandex API
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		if strings.Contains(err.Error(), "operation not permitted") {
+			t.Skipf("skip: cannot start test HTTP server: %v", err)
+		}
+		t.Fatalf("failed to listen for test server: %v", err)
+	}
+
+	ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"response":{"GeoObjectCollection":{"featureMember":[{"GeoObject":{"Point":{"pos":"37.6200 55.7500"}}}]}}}`)
 	}))
+	ts.Listener = ln
+	ts.Start()
 	defer ts.Close()
 
 	rdb := newTestRedis(t)

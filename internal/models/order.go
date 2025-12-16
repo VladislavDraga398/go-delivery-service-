@@ -33,6 +33,8 @@ type Order struct {
 	Items           []OrderItem `json:"items"`
 	TotalAmount     float64     `json:"total_amount" db:"total_amount"`
 	DeliveryCost    float64     `json:"delivery_cost" db:"delivery_cost"`
+	DiscountAmount  float64     `json:"discount_amount" db:"discount_amount"`
+	PromoCode       *string     `json:"promo_code,omitempty" db:"promo_code"`
 	Status          OrderStatus `json:"status" db:"status"`
 	CourierID       *uuid.UUID  `json:"courier_id,omitempty" db:"courier_id"`
 	Rating          *int        `json:"rating,omitempty" db:"rating"`
@@ -63,6 +65,7 @@ type CreateOrderRequest struct {
 	PickupLon       *float64                 `json:"pickup_lon,omitempty"`
 	DeliveryLat     *float64                 `json:"delivery_lat,omitempty"`
 	DeliveryLon     *float64                 `json:"delivery_lon,omitempty"`
+	PromoCode       *string                  `json:"promo_code,omitempty"`
 }
 
 // CreateOrderItemRequest представляет запрос на создание товара в заказе

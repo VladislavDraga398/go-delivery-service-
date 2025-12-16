@@ -345,8 +345,8 @@ func (h *CourierHandler) AssignOrderToCourier(w http.ResponseWriter, r *http.Req
 	courierCacheKey := redis.GenerateKey(redis.KeyPrefixCourier, courierID.String())
 	orderCacheKey := redis.GenerateKey(redis.KeyPrefixOrder, req.OrderID.String())
 
-	h.redisClient.Delete(r.Context(), courierCacheKey)
-	h.redisClient.Delete(r.Context(), orderCacheKey)
+	_ = h.redisClient.Delete(r.Context(), courierCacheKey)
+	_ = h.redisClient.Delete(r.Context(), orderCacheKey)
 
 	h.log.WithField("order_id", req.OrderID).WithField("courier_id", courierID).Info("Order assigned to courier")
 	writeJSONResponse(w, http.StatusOK, map[string]string{"message": "Order assigned to courier successfully"})

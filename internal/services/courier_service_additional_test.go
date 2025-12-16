@@ -199,7 +199,7 @@ func TestCourierService_AssignOrderToCourier_Success(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
 	mock.ExpectExec("UPDATE couriers SET status").
-		WithArgs(models.CourierStatusBusy, sqlmock.AnyArg(), courierID).
+		WithArgs(models.CourierStatusBusy, sqlmock.AnyArg(), courierID, models.CourierStatusAvailable).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
 	mock.ExpectCommit()

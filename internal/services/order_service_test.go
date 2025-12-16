@@ -36,7 +36,7 @@ func TestOrderService_CreateReview_Success(t *testing.T) {
 	defer db.Close()
 
 	log := newTestLogger()
-	service := NewOrderService(db, log, newTestPricingService())
+	service := NewOrderService(db, log, newTestPricingService(), nil)
 
 	orderID := uuid.New()
 	courierID := uuid.New()
@@ -78,7 +78,7 @@ func TestOrderService_CreateReview_OrderNotFound(t *testing.T) {
 	defer db.Close()
 
 	log := newTestLogger()
-	service := NewOrderService(db, log, newTestPricingService())
+	service := NewOrderService(db, log, newTestPricingService(), nil)
 
 	orderID := uuid.New()
 	req := &models.CreateReviewRequest{Rating: 4}
@@ -103,7 +103,7 @@ func TestOrderService_CreateReview_NotDelivered(t *testing.T) {
 	defer db.Close()
 
 	log := newTestLogger()
-	service := NewOrderService(db, log, newTestPricingService())
+	service := NewOrderService(db, log, newTestPricingService(), nil)
 
 	orderID := uuid.New()
 	courierID := uuid.New()
@@ -130,7 +130,7 @@ func TestOrderService_CreateReview_AlreadyExists(t *testing.T) {
 	defer db.Close()
 
 	log := newTestLogger()
-	service := NewOrderService(db, log, newTestPricingService())
+	service := NewOrderService(db, log, newTestPricingService(), nil)
 
 	orderID := uuid.New()
 	courierID := uuid.New()
@@ -157,7 +157,7 @@ func TestOrderService_CreateReview_InvalidRating(t *testing.T) {
 	defer db.Close()
 
 	log := newTestLogger()
-	service := NewOrderService(db, log, newTestPricingService())
+	service := NewOrderService(db, log, newTestPricingService(), nil)
 
 	orderID := uuid.New()
 	req := &models.CreateReviewRequest{Rating: 6}
@@ -172,7 +172,7 @@ func TestOrderService_GetCourierReviews(t *testing.T) {
 	defer db.Close()
 
 	log := newTestLogger()
-	service := NewOrderService(db, log, newTestPricingService())
+	service := NewOrderService(db, log, newTestPricingService(), nil)
 
 	courierID := uuid.New()
 	limit, offset := 10, 0

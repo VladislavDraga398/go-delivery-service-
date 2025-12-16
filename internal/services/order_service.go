@@ -17,14 +17,16 @@ type OrderService struct {
 	db      *database.DB
 	log     *logger.Logger
 	pricing *PricingService
+	promo   *PromoService
 }
 
 // NewOrderService создает новый экземпляр сервиса заказов
-func NewOrderService(db *database.DB, log *logger.Logger, pricing *PricingService) *OrderService {
+func NewOrderService(db *database.DB, log *logger.Logger, pricing *PricingService, promo *PromoService) *OrderService {
 	return &OrderService{
 		db:      db,
 		log:     log,
 		pricing: pricing,
+		promo:   promo,
 	}
 }
 
@@ -39,17 +41,35 @@ func (s *OrderService) CreateOrder(req *models.CreateOrderRequest) (*models.Orde
 	if err != nil {
 		return nil, fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
-	// Расчет общей суммы заказа
-	var totalAmount float64
+	// Расчет суммарной стоимости товаров
+	var itemsTotal float64
 	for _, item := range req.Items {
-		totalAmount += item.Price * float64(item.Quantity)
+		itemsTotal += item.Price * float64(item.Quantity)
 	}
 
 	// Расчет стоимости доставки
 	distanceKm := calculateDistance(*req.PickupLat, *req.PickupLon, *req.DeliveryLat, *req.DeliveryLon)
 	deliveryCost := s.pricing.CalculateCost(distanceKm)
+
+	// Применение промокода, если указан
+	var discountAmount float64
+	if req.PromoCode != nil && *req.PromoCode != "" {
+		if s.promo == nil {
+			return nil, fmt.Errorf("promo codes are not supported")
+		}
+
+		discountAmount, err = s.promo.ApplyPromoWithTx(tx, *req.PromoCode, itemsTotal, deliveryCost)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	totalAmount := itemsTotal + deliveryCost - discountAmount
+	if totalAmount < 0 {
+		totalAmount = 0
+	}
 
 	// Создание заказа
 	orderID := uuid.New()
@@ -65,18 +85,20 @@ func (s *OrderService) CreateOrder(req *models.CreateOrderRequest) (*models.Orde
 		DeliveryLon:     req.DeliveryLon,
 		TotalAmount:     totalAmount,
 		DeliveryCost:    deliveryCost,
+		DiscountAmount:  discountAmount,
+		PromoCode:       req.PromoCode,
 		Status:          models.OrderStatusCreated,
 		CreatedAt:       time.Now(),
 		UpdatedAt:       time.Now(),
 	}
 
 	query := `
-		INSERT INTO orders (id, customer_name, customer_phone, delivery_address, pickup_address, pickup_lat, pickup_lon, delivery_lat, delivery_lon, total_amount, delivery_cost, status, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+		INSERT INTO orders (id, customer_name, customer_phone, delivery_address, pickup_address, pickup_lat, pickup_lon, delivery_lat, delivery_lon, total_amount, delivery_cost, discount_amount, promo_code, status, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 	`
 	_, err = tx.Exec(query, order.ID, order.CustomerName, order.CustomerPhone,
 		order.DeliveryAddress, order.PickupAddress, order.PickupLat, order.PickupLon, order.DeliveryLat, order.DeliveryLon,
-		order.TotalAmount, order.DeliveryCost, order.Status, order.CreatedAt, order.UpdatedAt)
+		order.TotalAmount, order.DeliveryCost, order.DiscountAmount, order.PromoCode, order.Status, order.CreatedAt, order.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create order: %w", err)
 	}
@@ -120,7 +142,7 @@ func (s *OrderService) GetOrder(orderID uuid.UUID) (*models.Order, error) {
 	order := &models.Order{}
 
 	query := `
-		SELECT id, customer_name, customer_phone, delivery_address, pickup_address, pickup_lat, pickup_lon, delivery_lat, delivery_lon, total_amount, delivery_cost,
+		SELECT id, customer_name, customer_phone, delivery_address, pickup_address, pickup_lat, pickup_lon, delivery_lat, delivery_lon, total_amount, delivery_cost, discount_amount, promo_code,
 		       status, courier_id, rating, review_comment, created_at, updated_at, delivered_at
 		FROM orders 
 		WHERE id = $1
@@ -128,7 +150,7 @@ func (s *OrderService) GetOrder(orderID uuid.UUID) (*models.Order, error) {
 
 	err := s.db.QueryRow(query, orderID).Scan(
 		&order.ID, &order.CustomerName, &order.CustomerPhone, &order.DeliveryAddress, &order.PickupAddress,
-		&order.PickupLat, &order.PickupLon, &order.DeliveryLat, &order.DeliveryLon, &order.TotalAmount, &order.DeliveryCost,
+		&order.PickupLat, &order.PickupLon, &order.DeliveryLat, &order.DeliveryLon, &order.TotalAmount, &order.DeliveryCost, &order.DiscountAmount, &order.PromoCode,
 		&order.Status, &order.CourierID, &order.Rating, &order.ReviewComment,
 		&order.CreatedAt, &order.UpdatedAt, &order.DeliveredAt,
 	)
@@ -173,7 +195,7 @@ func (s *OrderService) CreateReview(orderID uuid.UUID, req *models.CreateReviewR
 	if err != nil {
 		return nil, fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// Получаем заказ и привязанного курьера, проверяем статус и отсутствие отзыва
 	var courierID uuid.UUID
@@ -291,7 +313,7 @@ func (s *OrderService) UpdateOrderStatus(orderID uuid.UUID, req *models.UpdateOr
 // GetOrders получает список заказов с фильтрацией
 func (s *OrderService) GetOrders(status *models.OrderStatus, courierID *uuid.UUID, limit, offset int) ([]*models.Order, error) {
 	query := `
-		SELECT id, customer_name, customer_phone, delivery_address, pickup_address, pickup_lat, pickup_lon, delivery_lat, delivery_lon, total_amount, delivery_cost,
+		SELECT id, customer_name, customer_phone, delivery_address, pickup_address, pickup_lat, pickup_lon, delivery_lat, delivery_lon, total_amount, delivery_cost, discount_amount, promo_code,
 		       status, courier_id, rating, review_comment, created_at, updated_at, delivered_at
 		FROM orders 
 		WHERE 1=1
@@ -335,7 +357,7 @@ func (s *OrderService) GetOrders(status *models.OrderStatus, courierID *uuid.UUI
 		order := &models.Order{}
 		if err := rows.Scan(&order.ID, &order.CustomerName, &order.CustomerPhone,
 			&order.DeliveryAddress, &order.PickupAddress, &order.PickupLat, &order.PickupLon, &order.DeliveryLat, &order.DeliveryLon,
-			&order.TotalAmount, &order.DeliveryCost, &order.Status,
+			&order.TotalAmount, &order.DeliveryCost, &order.DiscountAmount, &order.PromoCode, &order.Status,
 			&order.CourierID, &order.Rating, &order.ReviewComment,
 			&order.CreatedAt, &order.UpdatedAt, &order.DeliveredAt); err != nil {
 			return nil, fmt.Errorf("failed to scan order: %w", err)

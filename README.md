@@ -556,14 +556,25 @@ delivery-system/
 
 
 ## Уже реализованно (для дополнительной информации)
-- Мониторинг и трейсинг Kafka: метрики, correlation ID, DLQ, `/api/kafka/stats`
-- Event Sourcing для заказов: топик `order-events`, snapshots, projection, `/api/orders/{id}/events`
-- Интеллектуальное кеширование Redis: cache-aside, прогрев, метрики cache hit/miss
-- Rate limiting на Redis: sliding window, тарифы, `/api/rate-limit/status`, Lua для атомарности
+- Отзывы и рейтинги курьеров: пересчёт рейтинга триггером БД, `/api/orders/{id}/review`, `/api/couriers/{id}/reviews`
+- Автоназначение курьера по расстоянию/рейтингу/нагрузке: `/api/orders/{id}/auto-assign`, опция `auto_assign` при создании
+- Расчёт стоимости доставки по расстоянию и тарифам конфига; геокодер (offline/Yandex) с кешем в Redis
+- Кеширование заказов/курьеров в Redis, простые health/readiness/liveness
+- Публикация событий в Kafka (создание заказа, смена статуса, назначение курьера), базовый consumer с регистрацией хендлеров
+
+## Не реализовано из ТЗ
+- Отчётность/аналитика `/api/analytics/*` с кешем/экспортом
+- Расширенный мониторинг Kafka (метрики, correlation ID, DLQ) и event sourcing для заказов
+- Rate limiting на Redis `/api/rate-limit/status`
+
+## Новое по промокодам
+- Таблица `promo_codes` (fixed/percent/free_delivery, лимит использований, срок действия, active)
+- API `/api/promo-codes` (POST/GET) и `/api/promo-codes/{code}` (GET/PUT/DELETE)
+- Применение промокода при создании заказа (`promo_code` в запросе), хранение скидки `discount_amount` и кода в заказе
 
 ## Статус реализации по основному ТЗ (1–5)
 - Сделано: рейтинги/отзывы, пересчет рейтинга, отзывы курьеров, сортировка `order_by=rating`.
 - Сделано: автоназначение курьера (эндпоинт + опция `auto_assign` при создании).
 - Сделано: расчет стоимости доставки по расстоянию, тарифы из конфига, геокодер (Yandex/offline) с кешем в Redis.
-- Не сделано: промокоды и скидки.
+- Сделано: промокоды и скидки.
 - Не сделано: отчётность/аналитика `/api/analytics/*` с кешем/экспортом.

@@ -54,13 +54,18 @@ func main() {
 	if err != nil {
 		log.WithError(err).Fatal("Failed to create Kafka consumer")
 	}
-	defer consumer.Stop()
+	defer func() {
+		if err := consumer.Stop(); err != nil {
+			log.WithError(err).Warn("Failed to stop Kafka consumer gracefully")
+		}
+	}()
 
 	// Тарифы доставки
 	pricingService := services.NewPricingService(cfg.Pricing.BaseFare, cfg.Pricing.PerKm, cfg.Pricing.MinFare)
+	promoService := services.NewPromoService(db, log)
 
 	// Инициализация сервисов
-	orderService := services.NewOrderService(db, log, pricingService)
+	orderService := services.NewOrderService(db, log, pricingService, promoService)
 	courierService := services.NewCourierService(db, log)
 	assignmentService := services.NewCourierAssignmentService(db, courierService, orderService, log)
 	geocodingService := services.NewGeocodingService(redisClient, log, &cfg.Geocoding)
@@ -68,7 +73,8 @@ func main() {
 	// Инициализация handlers
 	orderHandler := handlers.NewOrderHandler(orderService, assignmentService, geocodingService, producer, redisClient, log)
 	courierHandler := handlers.NewCourierHandler(courierService, orderService, producer, redisClient, log)
-	healthHandler := handlers.NewHealthHandler(db, redisClient)
+	promoHandler := handlers.NewPromoHandler(promoService, log)
+	healthHandler := handlers.NewHealthHandler(db, redisClient, cfg.Kafka.Brokers)
 
 	// Регистрация обработчиков событий Kafka
 	registerEventHandlers(consumer, log)
@@ -79,7 +85,7 @@ func main() {
 	}
 
 	// Настройка HTTP роутера
-	mux := setupRoutes(orderHandler, courierHandler, healthHandler)
+	mux := setupRoutes(orderHandler, courierHandler, healthHandler, promoHandler)
 
 	// Создание HTTP сервера
 	server := &http.Server{
@@ -116,7 +122,7 @@ func main() {
 }
 
 // setupRoutes настраивает маршруты HTTP сервера
-func setupRoutes(orderHandler *handlers.OrderHandler, courierHandler *handlers.CourierHandler, healthHandler *handlers.HealthHandler) *http.ServeMux {
+func setupRoutes(orderHandler *handlers.OrderHandler, courierHandler *handlers.CourierHandler, healthHandler *handlers.HealthHandler, promoHandler *handlers.PromoHandler) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	// Health check endpoints
@@ -132,6 +138,10 @@ func setupRoutes(orderHandler *handlers.OrderHandler, courierHandler *handlers.C
 	mux.HandleFunc("/api/couriers", corsMiddleware(handleCouriersRoute(courierHandler)))
 	mux.HandleFunc("/api/couriers/", corsMiddleware(handleCourierRoute(courierHandler)))
 	mux.HandleFunc("/api/couriers/available", corsMiddleware(courierHandler.GetAvailableCouriers))
+
+	// Promo codes endpoints
+	mux.HandleFunc("/api/promo-codes", corsMiddleware(handlePromoCodesRoute(promoHandler)))
+	mux.HandleFunc("/api/promo-codes/", corsMiddleware(handlePromoCodeRoute(promoHandler)))
 
 	return mux
 }
@@ -231,6 +241,39 @@ func handleCourierRoute(handler *handlers.CourierHandler) http.HandlerFunc {
 				writeErrorResponse(w, http.StatusMethodNotAllowed, "Method not allowed")
 			}
 		}
+	}
+}
+
+// handlePromoCodesRoute обрабатывает коллекцию промокодов
+func handlePromoCodesRoute(handler *handlers.PromoHandler) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			handler.ListPromoCodes(w, r)
+		case http.MethodPost:
+			handler.CreatePromoCode(w, r)
+		default:
+			writeErrorResponse(w, http.StatusMethodNotAllowed, "Method not allowed")
+		}
+	}
+}
+
+// handlePromoCodeRoute обрабатывает отдельный промокод
+func handlePromoCodeRoute(handler *handlers.PromoHandler) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			handler.GetPromoCode(w, r)
+			return
+		}
+		if r.Method == http.MethodPut {
+			handler.UpdatePromoCode(w, r)
+			return
+		}
+		if r.Method == http.MethodDelete {
+			handler.DeletePromoCode(w, r)
+			return
+		}
+		writeErrorResponse(w, http.StatusMethodNotAllowed, "Method not allowed")
 	}
 }
 

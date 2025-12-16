@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -117,9 +118,9 @@ func (h *OrderHandler) CreateOrder(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// Инвалидация кешей
-			h.redisClient.Delete(r.Context(), cacheKey)
+			_ = h.redisClient.Delete(r.Context(), cacheKey)
 			courierCacheKey := redis.GenerateKey(redis.KeyPrefixCourier, courier.ID.String())
-			h.redisClient.Delete(r.Context(), courierCacheKey)
+			_ = h.redisClient.Delete(r.Context(), courierCacheKey)
 		}
 	}
 
@@ -325,11 +326,11 @@ func (h *OrderHandler) CreateReview(w http.ResponseWriter, r *http.Request) {
 
 	// Инвалидация кеша заказа
 	cacheKey := redis.GenerateKey(redis.KeyPrefixOrder, orderID.String())
-	h.redisClient.Delete(r.Context(), cacheKey)
+	_ = h.redisClient.Delete(r.Context(), cacheKey)
 
 	// Инвалидация кеша курьера
 	courierCacheKey := redis.GenerateKey(redis.KeyPrefixCourier, review.CourierID.String())
-	h.redisClient.Delete(r.Context(), courierCacheKey)
+	_ = h.redisClient.Delete(r.Context(), courierCacheKey)
 
 	writeJSONResponse(w, http.StatusCreated, review)
 }
@@ -350,6 +351,9 @@ func (h *OrderHandler) validateCreateOrderRequest(req *models.CreateOrderRequest
 	}
 	if len(req.Items) == 0 {
 		return fmt.Errorf("order items are required")
+	}
+	if req.PromoCode != nil && len(*req.PromoCode) > 64 {
+		return fmt.Errorf("promo code is too long")
 	}
 
 	for i, item := range req.Items {
@@ -387,17 +391,13 @@ func (h *OrderHandler) validateCreateOrderRequest(req *models.CreateOrderRequest
 	}
 
 	// Проверка координат для автоназначения
-	if req.AutoAssign {
-		// координаты уже проверены выше
-	}
-
 	return nil
 }
 
 // AutoAssignCourierRequest представляет запрос на автоназначение курьера
 type AutoAssignCourierRequest struct {
-	DeliveryLat float64 `json:"delivery_lat"`
-	DeliveryLon float64 `json:"delivery_lon"`
+	DeliveryLat *float64 `json:"delivery_lat,omitempty"`
+	DeliveryLon *float64 `json:"delivery_lon,omitempty"`
 }
 
 // AutoAssignCourier автоматически назначает оптимального курьера на заказ
@@ -414,23 +414,55 @@ func (h *OrderHandler) AutoAssignCourier(w http.ResponseWriter, r *http.Request)
 	}
 
 	var req AutoAssignCourierRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
 		writeErrorResponse(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
 
+	order, err := h.orderService.GetOrder(orderID)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			writeErrorResponse(w, http.StatusNotFound, "Order not found")
+		} else {
+			writeErrorResponse(w, http.StatusInternalServerError, "Failed to get order")
+		}
+		return
+	}
+
+	// Определяем координаты доставки: либо из запроса, либо из заказа
+	var (
+		deliveryLat float64
+		deliveryLon float64
+	)
+
+	if req.DeliveryLat != nil || req.DeliveryLon != nil {
+		if req.DeliveryLat == nil || req.DeliveryLon == nil {
+			writeErrorResponse(w, http.StatusBadRequest, "Both delivery_lat and delivery_lon must be provided")
+			return
+		}
+		deliveryLat = *req.DeliveryLat
+		deliveryLon = *req.DeliveryLon
+	} else {
+		if order.DeliveryLat == nil || order.DeliveryLon == nil {
+			writeErrorResponse(w, http.StatusInternalServerError, "Delivery coordinates are missing for the order")
+			return
+		}
+		deliveryLat = *order.DeliveryLat
+		deliveryLon = *order.DeliveryLon
+	}
+
 	// Валидация координат
-	if req.DeliveryLat < -90 || req.DeliveryLat > 90 {
+	if deliveryLat < -90 || deliveryLat > 90 {
 		writeErrorResponse(w, http.StatusBadRequest, "Invalid delivery latitude")
 		return
 	}
-	if req.DeliveryLon < -180 || req.DeliveryLon > 180 {
+	if deliveryLon < -180 || deliveryLon > 180 {
 		writeErrorResponse(w, http.StatusBadRequest, "Invalid delivery longitude")
 		return
 	}
 
 	// Автоматическое назначение курьера
-	courier, err := h.assignmentService.AutoAssignCourier(orderID, req.DeliveryLat, req.DeliveryLon)
+	courier, err := h.assignmentService.AutoAssignCourier(orderID, deliveryLat, deliveryLon)
 	if err != nil {
 		switch {
 		case strings.Contains(err.Error(), "not found"):
@@ -446,11 +478,11 @@ func (h *OrderHandler) AutoAssignCourier(w http.ResponseWriter, r *http.Request)
 
 	// Инвалидация кеша заказа
 	cacheKey := redis.GenerateKey(redis.KeyPrefixOrder, orderID.String())
-	h.redisClient.Delete(r.Context(), cacheKey)
+	_ = h.redisClient.Delete(r.Context(), cacheKey)
 
 	// Инвалидация кеша курьера
 	courierCacheKey := redis.GenerateKey(redis.KeyPrefixCourier, courier.ID.String())
-	h.redisClient.Delete(r.Context(), courierCacheKey)
+	_ = h.redisClient.Delete(r.Context(), courierCacheKey)
 
 	h.log.WithField("order_id", orderID).WithField("courier_id", courier.ID).Info("Courier auto-assigned successfully")
 	writeJSONResponse(w, http.StatusOK, courier)

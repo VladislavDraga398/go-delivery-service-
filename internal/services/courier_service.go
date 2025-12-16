@@ -192,11 +192,11 @@ func (s *CourierService) AssignOrderToCourier(orderID, courierID uuid.UUID) erro
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
-	// Проверяем, что курьер доступен
+	// Проверяем, что курьер доступен и блокируем строку, чтобы избежать гонок
 	var courierStatus string
-	courierQuery := "SELECT status FROM couriers WHERE id = $1"
+	courierQuery := "SELECT status FROM couriers WHERE id = $1 FOR UPDATE"
 	err = tx.QueryRow(courierQuery, courierID).Scan(&courierStatus)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -209,7 +209,7 @@ func (s *CourierService) AssignOrderToCourier(orderID, courierID uuid.UUID) erro
 		return fmt.Errorf("courier is not available")
 	}
 
-	// Назначаем заказ курьеру и меняем статус заказа
+	// Назначаем заказ курьеру и меняем статус заказа, если он ещё не занят
 	orderQuery := `
 		UPDATE orders 
 		SET courier_id = $1, status = $2, updated_at = $3
@@ -229,15 +229,24 @@ func (s *CourierService) AssignOrderToCourier(orderID, courierID uuid.UUID) erro
 		return fmt.Errorf("order not found or already assigned")
 	}
 
-	// Меняем статус курьера на "занят"
+	// Меняем статус курьера на "занят" только если он всё ещё доступен
 	courierUpdateQuery := `
 		UPDATE couriers 
 		SET status = $1, updated_at = $2
-		WHERE id = $3
+		WHERE id = $3 AND status = $4
 	`
-	_, err = tx.Exec(courierUpdateQuery, models.CourierStatusBusy, time.Now(), courierID)
+	result, err = tx.Exec(courierUpdateQuery, models.CourierStatusBusy, time.Now(), courierID, models.CourierStatusAvailable)
 	if err != nil {
 		return fmt.Errorf("failed to update courier status: %w", err)
+	}
+
+	rowsAffected, err = result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected when updating courier: %w", err)
+	}
+
+	if rowsAffected == 0 {
+		return fmt.Errorf("courier is not available")
 	}
 
 	if err = tx.Commit(); err != nil {

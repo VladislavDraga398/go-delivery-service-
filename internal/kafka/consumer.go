@@ -30,7 +30,7 @@ type Consumer struct {
 // NewConsumer создает новый Kafka consumer
 func NewConsumer(cfg *config.KafkaConfig, log *logger.Logger) (*Consumer, error) {
 	config := sarama.NewConfig()
-	config.Consumer.Group.Rebalance.Strategy = sarama.BalanceStrategyRoundRobin
+	config.Consumer.Group.Rebalance.Strategy = sarama.NewBalanceStrategyRoundRobin()
 	config.Consumer.Offsets.Initial = sarama.OffsetOldest
 	config.Consumer.Group.Session.Timeout = 10000000000   // 10 секунд
 	config.Consumer.Group.Heartbeat.Interval = 3000000000 // 3 секунды
