@@ -1,9 +1,11 @@
 package services
 
 import (
+	"context"
 	"fmt"
 	"math"
 
+	"delivery-system/internal/apperror"
 	"delivery-system/internal/database"
 	"delivery-system/internal/logger"
 	"delivery-system/internal/models"
@@ -59,29 +61,29 @@ func DefaultWeights() AssignmentWeights {
 }
 
 // AutoAssignCourier автоматически выбирает и назначает оптимального курьера на заказ
-func (s *CourierAssignmentService) AutoAssignCourier(orderID uuid.UUID, deliveryLat, deliveryLon float64) (*models.Courier, error) {
+func (s *CourierAssignmentService) AutoAssignCourier(ctx context.Context, orderID uuid.UUID, deliveryLat, deliveryLon float64) (*models.Courier, error) {
 	// Получаем заказ
-	order, err := s.orderService.GetOrder(orderID)
+	order, err := s.orderService.GetOrder(ctx, orderID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get order: %w", err)
 	}
 
 	if order.Status != models.OrderStatusCreated {
-		return nil, fmt.Errorf("order is not in 'created' status")
+		return nil, apperror.Conflict("order is not in 'created' status", nil)
 	}
 
 	if order.CourierID != nil {
-		return nil, fmt.Errorf("order already has assigned courier")
+		return nil, apperror.Conflict("order already has assigned courier", nil)
 	}
 
 	// Получаем доступных курьеров
-	availableCouriers, err := s.courierService.GetAvailableCouriers()
+	availableCouriers, err := s.courierService.GetAvailableCouriers(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get available couriers: %w", err)
 	}
 
 	if len(availableCouriers) == 0 {
-		return nil, fmt.Errorf("no available couriers found")
+		return nil, apperror.Conflict("no available couriers found", nil)
 	}
 
 	// Фильтруем курьеров с координатами
@@ -93,7 +95,7 @@ func (s *CourierAssignmentService) AutoAssignCourier(orderID uuid.UUID, delivery
 	}
 
 	if len(couriersWithLocation) == 0 {
-		return nil, fmt.Errorf("no couriers with known location available")
+		return nil, apperror.Conflict("no couriers with known location available", nil)
 	}
 
 	// Рассчитываем оценки для каждого курьера
@@ -101,7 +103,7 @@ func (s *CourierAssignmentService) AutoAssignCourier(orderID uuid.UUID, delivery
 	scores := make([]CourierScore, 0, len(couriersWithLocation))
 
 	for _, courier := range couriersWithLocation {
-		score := s.calculateCourierScore(courier, deliveryLat, deliveryLon, weights)
+		score := s.calculateCourierScore(ctx, courier, deliveryLat, deliveryLon, weights)
 		scores = append(scores, score)
 	}
 
@@ -114,7 +116,7 @@ func (s *CourierAssignmentService) AutoAssignCourier(orderID uuid.UUID, delivery
 	}
 
 	// Назначаем заказ лучшему курьеру
-	err = s.courierService.AssignOrderToCourier(orderID, bestScore.CourierID)
+	err = s.courierService.AssignOrderToCourier(ctx, orderID, bestScore.CourierID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to assign order to courier: %w", err)
 	}
@@ -134,11 +136,11 @@ func (s *CourierAssignmentService) AutoAssignCourier(orderID uuid.UUID, delivery
 	}).Info("Courier auto-assigned based on scoring algorithm")
 
 	// Возвращаем назначенного курьера
-	return s.courierService.GetCourier(bestScore.CourierID)
+	return s.courierService.GetCourier(ctx, bestScore.CourierID)
 }
 
 // calculateCourierScore рассчитывает общую оценку курьера для назначения
-func (s *CourierAssignmentService) calculateCourierScore(courier *models.Courier, targetLat, targetLon float64, weights AssignmentWeights) CourierScore {
+func (s *CourierAssignmentService) calculateCourierScore(ctx context.Context, courier *models.Courier, targetLat, targetLon float64, weights AssignmentWeights) CourierScore {
 	score := CourierScore{
 		CourierID:   courier.ID,
 		CourierName: courier.Name,
@@ -162,7 +164,7 @@ func (s *CourierAssignmentService) calculateCourierScore(courier *models.Courier
 	score.RatingScore = courier.Rating / 5.0
 
 	// Workload Score: получаем количество активных заказов у курьера
-	activeOrders := s.getActiveCourierOrders(courier.ID)
+	activeOrders := s.getActiveCourierOrders(ctx, courier.ID)
 	score.ActiveOrders = activeOrders
 
 	// Чем меньше заказов, тем лучше (используем обратную функцию)
@@ -183,7 +185,7 @@ func (s *CourierAssignmentService) calculateCourierScore(courier *models.Courier
 }
 
 // getActiveCourierOrders возвращает количество активных заказов у курьера
-func (s *CourierAssignmentService) getActiveCourierOrders(courierID uuid.UUID) int {
+func (s *CourierAssignmentService) getActiveCourierOrders(ctx context.Context, courierID uuid.UUID) int {
 	query := `
 		SELECT COUNT(*) 
 		FROM orders 
@@ -192,7 +194,7 @@ func (s *CourierAssignmentService) getActiveCourierOrders(courierID uuid.UUID) i
 	`
 
 	var count int
-	err := s.db.QueryRow(query, courierID).Scan(&count)
+	err := s.db.QueryRowContext(ctx, query, courierID).Scan(&count)
 	if err != nil {
 		s.log.WithError(err).WithField("courier_id", courierID).Warn("Failed to get active orders count, assuming 0")
 		return 0

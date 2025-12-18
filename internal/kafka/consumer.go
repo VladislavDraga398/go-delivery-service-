@@ -29,13 +29,31 @@ type Consumer struct {
 
 // NewConsumer создает новый Kafka consumer
 func NewConsumer(cfg *config.KafkaConfig, log *logger.Logger) (*Consumer, error) {
+	return newConsumerWithFactory(cfg, log, sarama.NewConsumerGroup)
+}
+
+// NewTestConsumer создает consumer для тестов с уже подготовленным consumer group.
+func NewTestConsumer(group sarama.ConsumerGroup, log *logger.Logger) *Consumer {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Consumer{
+		consumer: group,
+		log:      log,
+		handlers: make(map[models.EventType]EventHandler),
+		topics:   []string{},
+		ctx:      ctx,
+		cancel:   cancel,
+	}
+}
+
+// newConsumerWithFactory позволяет подменять фабрику consumer group в тестах.
+func newConsumerWithFactory(cfg *config.KafkaConfig, log *logger.Logger, factory func([]string, string, *sarama.Config) (sarama.ConsumerGroup, error)) (*Consumer, error) {
 	config := sarama.NewConfig()
 	config.Consumer.Group.Rebalance.Strategy = sarama.NewBalanceStrategyRoundRobin()
 	config.Consumer.Offsets.Initial = sarama.OffsetOldest
 	config.Consumer.Group.Session.Timeout = 10000000000   // 10 секунд
 	config.Consumer.Group.Heartbeat.Interval = 3000000000 // 3 секунды
 
-	consumer, err := sarama.NewConsumerGroup(cfg.Brokers, cfg.GroupID, config)
+	consumer, err := factory(cfg.Brokers, cfg.GroupID, config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Kafka consumer: %w", err)
 	}
@@ -58,12 +76,34 @@ func NewConsumer(cfg *config.KafkaConfig, log *logger.Logger) (*Consumer, error)
 
 // RegisterHandler регистрирует обработчик для определенного типа события
 func (c *Consumer) RegisterHandler(eventType models.EventType, handler EventHandler) {
+	if c.handlers == nil {
+		c.handlers = make(map[models.EventType]EventHandler)
+	}
 	c.handlers[eventType] = handler
-	c.log.WithField("event_type", eventType).Info("Event handler registered")
+	if c.log != nil {
+		c.log.WithField("event_type", eventType).Info("Event handler registered")
+	}
+}
+
+// HandlerCount возвращает количество зарегистрированных хендлеров (для тестов/диагностики).
+func (c *Consumer) HandlerCount() int {
+	return len(c.handlers)
+}
+
+// Handler возвращает зарегистрированный обработчик (для тестов/диагностики).
+func (c *Consumer) Handler(eventType models.EventType) EventHandler {
+	if c.handlers == nil {
+		return nil
+	}
+	return c.handlers[eventType]
 }
 
 // Start запускает consumer
 func (c *Consumer) Start() error {
+	if c.consumer == nil {
+		return fmt.Errorf("consumer not initialized")
+	}
+
 	c.wg.Add(1)
 	go func() {
 		defer c.wg.Done()
@@ -85,8 +125,13 @@ func (c *Consumer) Start() error {
 
 // Stop останавливает consumer
 func (c *Consumer) Stop() error {
-	c.cancel()
+	if c.cancel != nil {
+		c.cancel()
+	}
 	c.wg.Wait()
+	if c.consumer == nil {
+		return nil
+	}
 	return c.consumer.Close()
 }
 

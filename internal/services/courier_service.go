@@ -1,15 +1,19 @@
 package services
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
+	"delivery-system/internal/apperror"
 	"delivery-system/internal/database"
 	"delivery-system/internal/logger"
 	"delivery-system/internal/models"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 )
 
 // CourierService представляет сервис для работы с курьерами
@@ -27,7 +31,7 @@ func NewCourierService(db *database.DB, log *logger.Logger) *CourierService {
 }
 
 // CreateCourier создает нового курьера
-func (s *CourierService) CreateCourier(req *models.CreateCourierRequest) (*models.Courier, error) {
+func (s *CourierService) CreateCourier(ctx context.Context, req *models.CreateCourierRequest) (*models.Courier, error) {
 	courier := &models.Courier{
 		ID:           uuid.New(),
 		Name:         req.Name,
@@ -44,9 +48,13 @@ func (s *CourierService) CreateCourier(req *models.CreateCourierRequest) (*model
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 	`
 
-	_, err := s.db.Exec(query, courier.ID, courier.Name, courier.Phone,
+	_, err := s.db.ExecContext(ctx, query, courier.ID, courier.Name, courier.Phone,
 		courier.Status, courier.Rating, courier.TotalReviews, courier.CreatedAt, courier.UpdatedAt)
 	if err != nil {
+		var pqErr *pq.Error
+		if errors.As(err, &pqErr) && pqErr.Code == "23505" {
+			return nil, apperror.Conflict("courier with this phone already exists", err)
+		}
 		return nil, fmt.Errorf("failed to create courier: %w", err)
 	}
 
@@ -60,7 +68,7 @@ func (s *CourierService) CreateCourier(req *models.CreateCourierRequest) (*model
 }
 
 // GetCourier получает курьера по ID
-func (s *CourierService) GetCourier(courierID uuid.UUID) (*models.Courier, error) {
+func (s *CourierService) GetCourier(ctx context.Context, courierID uuid.UUID) (*models.Courier, error) {
 	courier := &models.Courier{}
 
 	query := `
@@ -70,14 +78,14 @@ func (s *CourierService) GetCourier(courierID uuid.UUID) (*models.Courier, error
 		WHERE id = $1
 	`
 
-	err := s.db.QueryRow(query, courierID).Scan(
+	err := s.db.QueryRowContext(ctx, query, courierID).Scan(
 		&courier.ID, &courier.Name, &courier.Phone, &courier.Status,
 		&courier.CurrentLat, &courier.CurrentLon, &courier.Rating, &courier.TotalReviews,
 		&courier.CreatedAt, &courier.UpdatedAt, &courier.LastSeenAt,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("courier not found")
+			return nil, apperror.NotFound("courier not found", err)
 		}
 		return nil, fmt.Errorf("failed to get courier: %w", err)
 	}
@@ -86,7 +94,7 @@ func (s *CourierService) GetCourier(courierID uuid.UUID) (*models.Courier, error
 }
 
 // UpdateCourierStatus обновляет статус курьера
-func (s *CourierService) UpdateCourierStatus(courierID uuid.UUID, req *models.UpdateCourierStatusRequest) error {
+func (s *CourierService) UpdateCourierStatus(ctx context.Context, courierID uuid.UUID, req *models.UpdateCourierStatusRequest) error {
 	query := `
 		UPDATE couriers 
 		SET status = $1, current_lat = $2, current_lon = $3, updated_at = $4, last_seen_at = $5
@@ -94,7 +102,7 @@ func (s *CourierService) UpdateCourierStatus(courierID uuid.UUID, req *models.Up
 	`
 
 	now := time.Now()
-	result, err := s.db.Exec(query, req.Status, req.CurrentLat, req.CurrentLon, now, now, courierID)
+	result, err := s.db.ExecContext(ctx, query, req.Status, req.CurrentLat, req.CurrentLon, now, now, courierID)
 	if err != nil {
 		return fmt.Errorf("failed to update courier status: %w", err)
 	}
@@ -105,7 +113,7 @@ func (s *CourierService) UpdateCourierStatus(courierID uuid.UUID, req *models.Up
 	}
 
 	if rowsAffected == 0 {
-		return fmt.Errorf("courier not found")
+		return apperror.NotFound("courier not found", nil)
 	}
 
 	s.log.WithFields(map[string]interface{}{
@@ -119,7 +127,7 @@ func (s *CourierService) UpdateCourierStatus(courierID uuid.UUID, req *models.Up
 }
 
 // GetCouriers получает список курьеров с фильтрацией
-func (s *CourierService) GetCouriers(status *models.CourierStatus, minRating *float64, limit, offset int, orderBy string) ([]*models.Courier, error) {
+func (s *CourierService) GetCouriers(ctx context.Context, status *models.CourierStatus, minRating *float64, limit, offset int, orderBy string) ([]*models.Courier, error) {
 	query := `
 		SELECT id, name, phone, status, current_lat, current_lon, rating, total_reviews,
 		       created_at, updated_at, last_seen_at
@@ -160,7 +168,7 @@ func (s *CourierService) GetCouriers(status *models.CourierStatus, minRating *fl
 		args = append(args, offset)
 	}
 
-	rows, err := s.db.Query(query, args...)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get couriers: %w", err)
 	}
@@ -181,14 +189,14 @@ func (s *CourierService) GetCouriers(status *models.CourierStatus, minRating *fl
 }
 
 // GetAvailableCouriers получает список доступных курьеров
-func (s *CourierService) GetAvailableCouriers() ([]*models.Courier, error) {
+func (s *CourierService) GetAvailableCouriers(ctx context.Context) ([]*models.Courier, error) {
 	status := models.CourierStatusAvailable
-	return s.GetCouriers(&status, nil, 0, 0, "created_at")
+	return s.GetCouriers(ctx, &status, nil, 0, 0, "created_at")
 }
 
 // AssignOrderToCourier назначает заказ курьеру
-func (s *CourierService) AssignOrderToCourier(orderID, courierID uuid.UUID) error {
-	tx, err := s.db.Begin()
+func (s *CourierService) AssignOrderToCourier(ctx context.Context, orderID, courierID uuid.UUID) error {
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
@@ -197,16 +205,16 @@ func (s *CourierService) AssignOrderToCourier(orderID, courierID uuid.UUID) erro
 	// Проверяем, что курьер доступен и блокируем строку, чтобы избежать гонок
 	var courierStatus string
 	courierQuery := "SELECT status FROM couriers WHERE id = $1 FOR UPDATE"
-	err = tx.QueryRow(courierQuery, courierID).Scan(&courierStatus)
+	err = tx.QueryRowContext(ctx, courierQuery, courierID).Scan(&courierStatus)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return fmt.Errorf("courier not found")
+			return apperror.NotFound("courier not found", err)
 		}
 		return fmt.Errorf("failed to check courier status: %w", err)
 	}
 
 	if courierStatus != string(models.CourierStatusAvailable) {
-		return fmt.Errorf("courier is not available")
+		return apperror.Conflict("courier is not available", nil)
 	}
 
 	// Назначаем заказ курьеру и меняем статус заказа, если он ещё не занят
@@ -215,7 +223,7 @@ func (s *CourierService) AssignOrderToCourier(orderID, courierID uuid.UUID) erro
 		SET courier_id = $1, status = $2, updated_at = $3
 		WHERE id = $4 AND status = $5
 	`
-	result, err := tx.Exec(orderQuery, courierID, models.OrderStatusAccepted, time.Now(), orderID, models.OrderStatusCreated)
+	result, err := tx.ExecContext(ctx, orderQuery, courierID, models.OrderStatusAccepted, time.Now(), orderID, models.OrderStatusCreated)
 	if err != nil {
 		return fmt.Errorf("failed to assign order to courier: %w", err)
 	}
@@ -226,7 +234,7 @@ func (s *CourierService) AssignOrderToCourier(orderID, courierID uuid.UUID) erro
 	}
 
 	if rowsAffected == 0 {
-		return fmt.Errorf("order not found or already assigned")
+		return apperror.Conflict("order not found or already assigned", nil)
 	}
 
 	// Меняем статус курьера на "занят" только если он всё ещё доступен
@@ -235,7 +243,7 @@ func (s *CourierService) AssignOrderToCourier(orderID, courierID uuid.UUID) erro
 		SET status = $1, updated_at = $2
 		WHERE id = $3 AND status = $4
 	`
-	result, err = tx.Exec(courierUpdateQuery, models.CourierStatusBusy, time.Now(), courierID, models.CourierStatusAvailable)
+	result, err = tx.ExecContext(ctx, courierUpdateQuery, models.CourierStatusBusy, time.Now(), courierID, models.CourierStatusAvailable)
 	if err != nil {
 		return fmt.Errorf("failed to update courier status: %w", err)
 	}
@@ -246,7 +254,7 @@ func (s *CourierService) AssignOrderToCourier(orderID, courierID uuid.UUID) erro
 	}
 
 	if rowsAffected == 0 {
-		return fmt.Errorf("courier is not available")
+		return apperror.Conflict("courier is not available", nil)
 	}
 
 	if err = tx.Commit(); err != nil {

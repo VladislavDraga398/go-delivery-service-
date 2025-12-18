@@ -1,6 +1,7 @@
 package services
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -28,7 +29,7 @@ func TestCourierService_GetCouriers_WithFilters(t *testing.T) {
 		WithArgs(status, minRating, limit).
 		WillReturnRows(rows)
 
-	couriers, err := service.GetCouriers(&status, &minRating, limit, offset, "created_at")
+	couriers, err := service.GetCouriers(context.Background(), &status, &minRating, limit, offset, "created_at")
 	if err != nil {
 		t.Fatalf("expected success, got error: %v", err)
 	}
@@ -59,7 +60,7 @@ func TestCourierService_GetCouriers_NoFilters(t *testing.T) {
 	mock.ExpectQuery("SELECT id, name, phone, status, current_lat, current_lon, rating, total_reviews,\\s+created_at, updated_at, last_seen_at\\s+FROM couriers").
 		WillReturnRows(rows)
 
-	couriers, err := service.GetCouriers(nil, nil, 0, 0, "created_at")
+	couriers, err := service.GetCouriers(context.Background(), nil, nil, 0, 0, "created_at")
 	if err != nil {
 		t.Fatalf("expected success, got error: %v", err)
 	}

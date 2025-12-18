@@ -43,6 +43,9 @@ func Connect(cfg *config.RedisConfig, log *logger.Logger) (*Client, error) {
 
 // Close закрывает подключение к Redis
 func (c *Client) Close() error {
+	if c == nil || c.client == nil {
+		return nil
+	}
 	return c.client.Close()
 }
 
@@ -102,6 +105,44 @@ func (c *Client) Exists(ctx context.Context, key string) (bool, error) {
 	return exists > 0, nil
 }
 
+// Incr увеличивает значение по ключу и возвращает новое значение
+func (c *Client) Incr(ctx context.Context, key string) (int64, error) {
+	val, err := c.client.Incr(ctx, key).Result()
+	if err != nil {
+		return 0, fmt.Errorf("failed to incr key %s: %w", key, err)
+	}
+	return val, nil
+}
+
+// Expire устанавливает TTL для ключа
+func (c *Client) Expire(ctx context.Context, key string, ttl time.Duration) error {
+	if err := c.client.Expire(ctx, key, ttl).Err(); err != nil {
+		return fmt.Errorf("failed to set ttl for key %s: %w", key, err)
+	}
+	return nil
+}
+
+// TTL возвращает оставшийся TTL для ключа
+func (c *Client) TTL(ctx context.Context, key string) (time.Duration, error) {
+	ttl, err := c.client.TTL(ctx, key).Result()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get ttl for key %s: %w", key, err)
+	}
+	return ttl, nil
+}
+
+// GetInt получает значение и парсит в int64
+func (c *Client) GetInt(ctx context.Context, key string) (int64, error) {
+	val, err := c.client.Get(ctx, key).Int64()
+	if err != nil {
+		if err == redis.Nil {
+			return 0, fmt.Errorf("key %s not found", key)
+		}
+		return 0, fmt.Errorf("failed to get int value for key %s: %w", key, err)
+	}
+	return val, nil
+}
+
 // SetMultiple устанавливает несколько значений за одну операцию
 func (c *Client) SetMultiple(ctx context.Context, values map[string]interface{}, ttl time.Duration) error {
 	pipe := c.client.Pipeline()
@@ -149,6 +190,33 @@ func (c *Client) GetMultiple(ctx context.Context, keys []string) (map[string]str
 func (c *Client) Health(ctx context.Context) error {
 	_, err := c.client.Ping(ctx).Result()
 	return err
+}
+
+// DeleteByPrefix удаляет ключи по префиксу (использует SCAN).
+func (c *Client) DeleteByPrefix(ctx context.Context, prefix string) error {
+	iter := c.client.Scan(ctx, 0, prefix+"*", 0).Iterator()
+	var keys []string
+
+	for iter.Next(ctx) {
+		keys = append(keys, iter.Val())
+	}
+	if err := iter.Err(); err != nil {
+		return fmt.Errorf("failed to scan keys by prefix %s: %w", prefix, err)
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+
+	if err := c.client.Del(ctx, keys...).Err(); err != nil {
+		return fmt.Errorf("failed to delete keys by prefix %s: %w", prefix, err)
+	}
+
+	c.log.WithFields(map[string]interface{}{
+		"prefix": prefix,
+		"count":  len(keys),
+	}).Debug("Deleted Redis keys by prefix")
+
+	return nil
 }
 
 // GenerateKey генерирует ключ для кеша

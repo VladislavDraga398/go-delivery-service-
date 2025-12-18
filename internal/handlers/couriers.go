@@ -5,28 +5,25 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
-	"strings"
 
-	"delivery-system/internal/kafka"
 	"delivery-system/internal/logger"
 	"delivery-system/internal/models"
 	"delivery-system/internal/redis"
-	"delivery-system/internal/services"
 
 	"github.com/google/uuid"
 )
 
 // CourierHandler представляет обработчик курьеров
 type CourierHandler struct {
-	courierService *services.CourierService
-	orderService   *services.OrderService
-	producer       *kafka.Producer
-	redisClient    *redis.Client
+	courierService CourierService
+	orderService   OrderService
+	producer       EventProducer
+	redisClient    RedisClient
 	log            *logger.Logger
 }
 
 // NewCourierHandler создает новый обработчик курьеров
-func NewCourierHandler(courierService *services.CourierService, orderService *services.OrderService, producer *kafka.Producer, redisClient *redis.Client, log *logger.Logger) *CourierHandler {
+func NewCourierHandler(courierService CourierService, orderService OrderService, producer EventProducer, redisClient RedisClient, log *logger.Logger) *CourierHandler {
 	return &CourierHandler{
 		courierService: courierService,
 		orderService:   orderService,
@@ -35,6 +32,8 @@ func NewCourierHandler(courierService *services.CourierService, orderService *se
 		log:            log,
 	}
 }
+
+// Интерфейсы вынесены в interfaces.go
 
 // CreateCourier создает нового курьера
 func (h *CourierHandler) CreateCourier(w http.ResponseWriter, r *http.Request) {
@@ -56,10 +55,9 @@ func (h *CourierHandler) CreateCourier(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Создание курьера
-	courier, err := h.courierService.CreateCourier(&req)
+	courier, err := h.courierService.CreateCourier(r.Context(), &req)
 	if err != nil {
-		h.log.WithError(err).Error("Failed to create courier")
-		writeErrorResponse(w, http.StatusInternalServerError, "Failed to create courier")
+		writeServiceError(w, h.log, err, "Failed to create courier")
 		return
 	}
 
@@ -96,14 +94,9 @@ func (h *CourierHandler) GetCourier(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Получение из базы данных
-	courierPtr, err := h.courierService.GetCourier(courierID)
+	courierPtr, err := h.courierService.GetCourier(r.Context(), courierID)
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			writeErrorResponse(w, http.StatusNotFound, "Courier not found")
-		} else {
-			h.log.WithError(err).Error("Failed to get courier")
-			writeErrorResponse(w, http.StatusInternalServerError, "Failed to get courier")
-		}
+		writeServiceError(w, h.log, err, "Failed to get courier")
 		return
 	}
 
@@ -135,26 +128,17 @@ func (h *CourierHandler) UpdateCourierStatus(w http.ResponseWriter, r *http.Requ
 	}
 
 	// Получение текущего курьера для определения старого статуса
-	currentCourier, err := h.courierService.GetCourier(courierID)
+	currentCourier, err := h.courierService.GetCourier(r.Context(), courierID)
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			writeErrorResponse(w, http.StatusNotFound, "Courier not found")
-		} else {
-			writeErrorResponse(w, http.StatusInternalServerError, "Failed to get courier")
-		}
+		writeServiceError(w, h.log, err, "Failed to get courier")
 		return
 	}
 
 	oldStatus := currentCourier.Status
 
 	// Обновление статуса
-	if err := h.courierService.UpdateCourierStatus(courierID, &req); err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			writeErrorResponse(w, http.StatusNotFound, "Courier not found")
-		} else {
-			h.log.WithError(err).Error("Failed to update courier status")
-			writeErrorResponse(w, http.StatusInternalServerError, "Failed to update courier status")
-		}
+	if err := h.courierService.UpdateCourierStatus(r.Context(), courierID, &req); err != nil {
+		writeServiceError(w, h.log, err, "Failed to update courier status")
 		return
 	}
 
@@ -232,7 +216,7 @@ func (h *CourierHandler) GetCouriers(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	couriers, err := h.courierService.GetCouriers(status, minRating, limit, offset, orderBy)
+	couriers, err := h.courierService.GetCouriers(r.Context(), status, minRating, limit, offset, orderBy)
 	if err != nil {
 		h.log.WithError(err).Error("Failed to get couriers")
 		writeErrorResponse(w, http.StatusInternalServerError, "Failed to get couriers")
@@ -249,7 +233,7 @@ func (h *CourierHandler) GetAvailableCouriers(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	couriers, err := h.courierService.GetAvailableCouriers()
+	couriers, err := h.courierService.GetAvailableCouriers(r.Context())
 	if err != nil {
 		h.log.WithError(err).Error("Failed to get available couriers")
 		writeErrorResponse(w, http.StatusInternalServerError, "Failed to get available couriers")
@@ -287,10 +271,9 @@ func (h *CourierHandler) GetCourierReviews(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	reviews, err := h.orderService.GetCourierReviews(courierID, limit, offset)
+	reviews, err := h.orderService.GetCourierReviews(r.Context(), courierID, limit, offset)
 	if err != nil {
-		h.log.WithError(err).Error("Failed to get courier reviews")
-		writeErrorResponse(w, http.StatusInternalServerError, "Failed to get courier reviews")
+		writeServiceError(w, h.log, err, "Failed to get courier reviews")
 		return
 	}
 
@@ -324,21 +307,18 @@ func (h *CourierHandler) AssignOrderToCourier(w http.ResponseWriter, r *http.Req
 	}
 
 	// Назначение заказа курьеру
-	if err := h.courierService.AssignOrderToCourier(req.OrderID, courierID); err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			writeErrorResponse(w, http.StatusNotFound, err.Error())
-		} else if strings.Contains(err.Error(), "not available") {
-			writeErrorResponse(w, http.StatusBadRequest, err.Error())
-		} else {
-			h.log.WithError(err).Error("Failed to assign order to courier")
-			writeErrorResponse(w, http.StatusInternalServerError, "Failed to assign order to courier")
-		}
+	if err := h.courierService.AssignOrderToCourier(r.Context(), req.OrderID, courierID); err != nil {
+		writeServiceError(w, h.log, err, "Failed to assign order to courier")
 		return
 	}
 
 	// Публикация события назначения курьера
 	if err := h.producer.PublishCourierAssigned(req.OrderID, courierID); err != nil {
 		h.log.WithError(err).Error("Failed to publish courier assigned event")
+	}
+	cid := courierID
+	if err := h.producer.PublishOrderStatusChanged(req.OrderID, models.OrderStatusCreated, models.OrderStatusAccepted, &cid); err != nil {
+		h.log.WithError(err).Error("Failed to publish order status changed event")
 	}
 
 	// Инвалидация кеша курьера и заказа

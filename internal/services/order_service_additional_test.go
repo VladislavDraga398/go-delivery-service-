@@ -1,6 +1,7 @@
 package services
 
 import (
+	"context"
 	"database/sql"
 	"testing"
 	"time"
@@ -48,7 +49,7 @@ func TestOrderService_CreateOrder_Success(t *testing.T) {
 
 	mock.ExpectCommit()
 
-	order, err := service.CreateOrder(req)
+	order, err := service.CreateOrder(context.Background(), req)
 	if err != nil {
 		t.Fatalf("expected success, got error: %v", err)
 	}
@@ -86,7 +87,7 @@ func TestOrderService_GetOrder_Success(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"id", "order_id", "name", "quantity", "price"}).
 			AddRow(uuid.New(), orderID, "Pizza", 1, 500.0))
 
-	order, err := service.GetOrder(orderID)
+	order, err := service.GetOrder(context.Background(), orderID)
 	if err != nil {
 		t.Fatalf("expected success, got error: %v", err)
 	}
@@ -117,7 +118,7 @@ func TestOrderService_GetOrder_NotFound(t *testing.T) {
 		WithArgs(orderID).
 		WillReturnError(sql.ErrNoRows)
 
-	_, err := service.GetOrder(orderID)
+	_, err := service.GetOrder(context.Background(), orderID)
 	if err == nil {
 		t.Fatalf("expected error, got nil")
 	}
@@ -145,7 +146,7 @@ func TestOrderService_UpdateOrderStatus_Success(t *testing.T) {
 		WithArgs(req.Status, req.CourierID, sqlmock.AnyArg(), orderID).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
-	err := service.UpdateOrderStatus(orderID, req)
+	err := service.UpdateOrderStatus(context.Background(), orderID, req)
 	if err != nil {
 		t.Fatalf("expected success, got error: %v", err)
 	}
@@ -173,7 +174,7 @@ func TestOrderService_UpdateOrderStatus_Delivered(t *testing.T) {
 		WithArgs(req.Status, req.CourierID, sqlmock.AnyArg(), sqlmock.AnyArg(), orderID).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
-	err := service.UpdateOrderStatus(orderID, req)
+	err := service.UpdateOrderStatus(context.Background(), orderID, req)
 	if err != nil {
 		t.Fatalf("expected success, got error: %v", err)
 	}
@@ -199,7 +200,7 @@ func TestOrderService_UpdateOrderStatus_NotFound(t *testing.T) {
 		WithArgs(req.Status, req.CourierID, sqlmock.AnyArg(), orderID).
 		WillReturnResult(sqlmock.NewResult(1, 0))
 
-	err := service.UpdateOrderStatus(orderID, req)
+	err := service.UpdateOrderStatus(context.Background(), orderID, req)
 	if err == nil {
 		t.Fatalf("expected error, got nil")
 	}
@@ -227,7 +228,7 @@ func TestOrderService_GetOrders_WithFilters(t *testing.T) {
 		WithArgs(status, courierID, limit).
 		WillReturnRows(rows)
 
-	orders, err := service.GetOrders(&status, &courierID, limit, offset)
+	orders, err := service.GetOrders(context.Background(), &status, &courierID, limit, offset)
 	if err != nil {
 		t.Fatalf("expected success, got error: %v", err)
 	}
@@ -254,7 +255,7 @@ func TestOrderService_GetOrders_NoFilters(t *testing.T) {
 	mock.ExpectQuery("SELECT id, customer_name, customer_phone, delivery_address, pickup_address, pickup_lat, pickup_lon, delivery_lat, delivery_lon, total_amount, delivery_cost, discount_amount, promo_code").
 		WillReturnRows(rows)
 
-	orders, err := service.GetOrders(nil, nil, 0, 0)
+	orders, err := service.GetOrders(context.Background(), nil, nil, 0, 0)
 	if err != nil {
 		t.Fatalf("expected success, got error: %v", err)
 	}

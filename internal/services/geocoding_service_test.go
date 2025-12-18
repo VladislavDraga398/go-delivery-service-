@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,10 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 )
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func newTestRedis(t *testing.T) *redis.Client {
 	mr, err := miniredis.Run()
@@ -73,6 +78,102 @@ func TestGeocodingService_Geocode_CachesResult(t *testing.T) {
 	}
 }
 
+func TestGeocodingService_YandexGeocode_StatusNotOK(t *testing.T) {
+	log := logger.New(&config.LoggerConfig{Level: "error", Format: "json"})
+	service := NewGeocodingService(nil, log, &config.GeocodingConfig{
+		Provider:       "yandex",
+		YandexAPIKey:   "k",
+		YandexBaseURL:  "http://example",
+		TimeoutSeconds: 1,
+	})
+	service.client = &http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusInternalServerError,
+				Body:       io.NopCloser(strings.NewReader("oops")),
+				Header:     make(http.Header),
+				Request:    r,
+			}, nil
+		}),
+	}
+
+	if _, _, err := service.yandexGeocode(context.Background(), "addr"); err == nil {
+		t.Fatalf("expected error for non-200 response")
+	}
+}
+
+func TestGeocodingService_YandexGeocode_DecodeError(t *testing.T) {
+	log := logger.New(&config.LoggerConfig{Level: "error", Format: "json"})
+	service := NewGeocodingService(nil, log, &config.GeocodingConfig{
+		Provider:       "yandex",
+		YandexAPIKey:   "k",
+		YandexBaseURL:  "http://example",
+		TimeoutSeconds: 1,
+	})
+	service.client = &http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader("{")),
+				Header:     make(http.Header),
+				Request:    r,
+			}, nil
+		}),
+	}
+
+	if _, _, err := service.yandexGeocode(context.Background(), "addr"); err == nil {
+		t.Fatalf("expected decode error")
+	}
+}
+
+func TestGeocodingService_YandexGeocode_EmptyPos(t *testing.T) {
+	log := logger.New(&config.LoggerConfig{Level: "error", Format: "json"})
+	service := NewGeocodingService(nil, log, &config.GeocodingConfig{
+		Provider:       "yandex",
+		YandexAPIKey:   "k",
+		YandexBaseURL:  "http://example",
+		TimeoutSeconds: 1,
+	})
+	service.client = &http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"response":{"GeoObjectCollection":{"featureMember":[]}}}`)),
+				Header:     make(http.Header),
+				Request:    r,
+			}, nil
+		}),
+	}
+
+	if _, _, err := service.yandexGeocode(context.Background(), "addr"); err == nil {
+		t.Fatalf("expected empty pos error")
+	}
+}
+
+func TestGeocodingService_YandexGeocode_ParseError(t *testing.T) {
+	log := logger.New(&config.LoggerConfig{Level: "error", Format: "json"})
+	service := NewGeocodingService(nil, log, &config.GeocodingConfig{
+		Provider:       "yandex",
+		YandexAPIKey:   "k",
+		YandexBaseURL:  "http://example",
+		TimeoutSeconds: 1,
+	})
+	service.client = &http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"response":{"GeoObjectCollection":{"featureMember":[{"GeoObject":{"Point":{"pos":"nope"}}}]}}}`)),
+				Header:     make(http.Header),
+				Request:    r,
+			}, nil
+		}),
+	}
+
+	if _, _, err := service.yandexGeocode(context.Background(), "addr"); err == nil {
+		t.Fatalf("expected parse error")
+	}
+}
+
 func TestGeocodingService_YandexProvider(t *testing.T) {
 	// Mock Yandex API
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -109,5 +210,34 @@ func TestGeocodingService_YandexProvider(t *testing.T) {
 
 	if lat != 55.75 || lon != 37.62 {
 		t.Fatalf("unexpected coords: lat=%.2f lon=%.2f", lat, lon)
+	}
+}
+
+func TestYandexResponse_FirstPos(t *testing.T) {
+	var resp yandexResponse
+	if resp.FirstPos() != "" {
+		t.Fatalf("expected empty pos for empty response")
+	}
+
+	resp.Response.GeoObjectCollection.FeatureMember = append(resp.Response.GeoObjectCollection.FeatureMember, struct {
+		GeoObject struct {
+			Point struct {
+				Pos string `json:"pos"`
+			} `json:"Point"`
+		} `json:"GeoObject"`
+	}{
+		GeoObject: struct {
+			Point struct {
+				Pos string `json:"pos"`
+			} `json:"Point"`
+		}{
+			Point: struct {
+				Pos string `json:"pos"`
+			}{Pos: "37 55"},
+		},
+	})
+
+	if got := resp.FirstPos(); got != "37 55" {
+		t.Fatalf("unexpected first pos: %s", got)
 	}
 }

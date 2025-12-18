@@ -1,34 +1,32 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strconv"
-	"strings"
 
-	"delivery-system/internal/kafka"
 	"delivery-system/internal/logger"
 	"delivery-system/internal/models"
 	"delivery-system/internal/redis"
-	"delivery-system/internal/services"
 
 	"github.com/google/uuid"
 )
 
 // OrderHandler представляет обработчик заказов
 type OrderHandler struct {
-	orderService      *services.OrderService
-	assignmentService *services.CourierAssignmentService
-	geocodingService  *services.GeocodingService
-	producer          *kafka.Producer
-	redisClient       *redis.Client
+	orderService      OrderService
+	assignmentService AssignmentService
+	geocodingService  GeocodingService
+	producer          EventProducer
+	redisClient       RedisClient
 	log               *logger.Logger
 }
 
 // NewOrderHandler создает новый обработчик заказов
-func NewOrderHandler(orderService *services.OrderService, assignmentService *services.CourierAssignmentService, geocodingService *services.GeocodingService, producer *kafka.Producer, redisClient *redis.Client, log *logger.Logger) *OrderHandler {
+func NewOrderHandler(orderService OrderService, assignmentService AssignmentService, geocodingService GeocodingService, producer EventProducer, redisClient RedisClient, log *logger.Logger) *OrderHandler {
 	return &OrderHandler{
 		orderService:      orderService,
 		assignmentService: assignmentService,
@@ -80,10 +78,9 @@ func (h *OrderHandler) CreateOrder(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Создание заказа
-	order, err := h.orderService.CreateOrder(&req)
+	order, err := h.orderService.CreateOrder(r.Context(), &req)
 	if err != nil {
-		h.log.WithError(err).Error("Failed to create order")
-		writeErrorResponse(w, http.StatusInternalServerError, "Failed to create order")
+		writeServiceError(w, h.log, err, "Failed to create order")
 		return
 	}
 
@@ -103,14 +100,14 @@ func (h *OrderHandler) CreateOrder(w http.ResponseWriter, r *http.Request) {
 	// Опциональное автоназначение курьера сразу после создания заказа
 	var assignedCourier *models.Courier
 	if req.AutoAssign {
-		courier, err := h.assignmentService.AutoAssignCourier(order.ID, *req.DeliveryLat, *req.DeliveryLon)
+		courier, err := h.assignmentService.AutoAssignCourier(r.Context(), order.ID, *req.DeliveryLat, *req.DeliveryLon)
 		if err != nil {
 			h.log.WithError(err).WithField("order_id", order.ID).Warn("Auto-assign failed after order creation")
 		} else {
 			assignedCourier = courier
 
 			// Обновляем заказ из БД, чтобы вернуть актуальный статус/курьера
-			updatedOrder, getErr := h.orderService.GetOrder(order.ID)
+			updatedOrder, getErr := h.orderService.GetOrder(r.Context(), order.ID)
 			if getErr == nil {
 				order = updatedOrder
 			} else {
@@ -121,6 +118,15 @@ func (h *OrderHandler) CreateOrder(w http.ResponseWriter, r *http.Request) {
 			_ = h.redisClient.Delete(r.Context(), cacheKey)
 			courierCacheKey := redis.GenerateKey(redis.KeyPrefixCourier, courier.ID.String())
 			_ = h.redisClient.Delete(r.Context(), courierCacheKey)
+
+			// События назначения/смены статуса (best effort)
+			if err := h.producer.PublishCourierAssigned(order.ID, courier.ID); err != nil {
+				h.log.WithError(err).Error("Failed to publish courier assigned event")
+			}
+			courierID := courier.ID
+			if err := h.producer.PublishOrderStatusChanged(order.ID, models.OrderStatusCreated, models.OrderStatusAccepted, &courierID); err != nil {
+				h.log.WithError(err).Error("Failed to publish order status changed event")
+			}
 		}
 	}
 
@@ -164,14 +170,9 @@ func (h *OrderHandler) GetOrder(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Получение из базы данных
-	orderPtr, err := h.orderService.GetOrder(orderID)
+	orderPtr, err := h.orderService.GetOrder(r.Context(), orderID)
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			writeErrorResponse(w, http.StatusNotFound, "Order not found")
-		} else {
-			h.log.WithError(err).Error("Failed to get order")
-			writeErrorResponse(w, http.StatusInternalServerError, "Failed to get order")
-		}
+		writeServiceError(w, h.log, err, "Failed to get order")
 		return
 	}
 
@@ -203,26 +204,17 @@ func (h *OrderHandler) UpdateOrderStatus(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Получение текущего заказа для определения старого статуса
-	currentOrder, err := h.orderService.GetOrder(orderID)
+	currentOrder, err := h.orderService.GetOrder(r.Context(), orderID)
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			writeErrorResponse(w, http.StatusNotFound, "Order not found")
-		} else {
-			writeErrorResponse(w, http.StatusInternalServerError, "Failed to get order")
-		}
+		writeServiceError(w, h.log, err, "Failed to get order")
 		return
 	}
 
 	oldStatus := currentOrder.Status
 
 	// Обновление статуса
-	if err := h.orderService.UpdateOrderStatus(orderID, &req); err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			writeErrorResponse(w, http.StatusNotFound, "Order not found")
-		} else {
-			h.log.WithError(err).Error("Failed to update order status")
-			writeErrorResponse(w, http.StatusInternalServerError, "Failed to update order status")
-		}
+	if err := h.orderService.UpdateOrderStatus(r.Context(), orderID, &req); err != nil {
+		writeServiceError(w, h.log, err, "Failed to update order status")
 		return
 	}
 
@@ -235,6 +227,11 @@ func (h *OrderHandler) UpdateOrderStatus(w http.ResponseWriter, r *http.Request)
 	cacheKey := redis.GenerateKey(redis.KeyPrefixOrder, orderID.String())
 	if err := h.redisClient.Delete(r.Context(), cacheKey); err != nil {
 		h.log.WithError(err).Error("Failed to invalidate order cache")
+	}
+
+	// Инвалидация кеша аналитики (best effort)
+	if err := h.invalidateStatsCache(r.Context()); err != nil {
+		h.log.WithError(err).Warn("Failed to invalidate analytics cache")
 	}
 
 	h.log.WithField("order_id", orderID).WithField("new_status", req.Status).Info("Order status updated")
@@ -281,7 +278,7 @@ func (h *OrderHandler) GetOrders(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	orders, err := h.orderService.GetOrders(status, courierID, limit, offset)
+	orders, err := h.orderService.GetOrders(r.Context(), status, courierID, limit, offset)
 	if err != nil {
 		h.log.WithError(err).Error("Failed to get orders")
 		writeErrorResponse(w, http.StatusInternalServerError, "Failed to get orders")
@@ -310,17 +307,9 @@ func (h *OrderHandler) CreateReview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	review, err := h.orderService.CreateReview(orderID, &req)
+	review, err := h.orderService.CreateReview(r.Context(), orderID, &req)
 	if err != nil {
-		switch {
-		case strings.Contains(err.Error(), "not found"):
-			writeErrorResponse(w, http.StatusNotFound, err.Error())
-		case strings.Contains(err.Error(), "not delivered") || strings.Contains(err.Error(), "no assigned") || strings.Contains(err.Error(), "already exists") || strings.Contains(err.Error(), "between 1 and 5"):
-			writeErrorResponse(w, http.StatusBadRequest, err.Error())
-		default:
-			h.log.WithError(err).Error("Failed to create review")
-			writeErrorResponse(w, http.StatusInternalServerError, "Failed to create review")
-		}
+		writeServiceError(w, h.log, err, "Failed to create review")
 		return
 	}
 
@@ -332,7 +321,21 @@ func (h *OrderHandler) CreateReview(w http.ResponseWriter, r *http.Request) {
 	courierCacheKey := redis.GenerateKey(redis.KeyPrefixCourier, review.CourierID.String())
 	_ = h.redisClient.Delete(r.Context(), courierCacheKey)
 
+	// Инвалидация кеша аналитики (best effort) — влияет на рейтинг/метрики курьера
+	if err := h.invalidateStatsCache(r.Context()); err != nil {
+		h.log.WithError(err).Warn("Failed to invalidate analytics cache")
+	}
+
 	writeJSONResponse(w, http.StatusCreated, review)
+}
+
+// invalidateStatsCache очищает кеш аналитики (best effort)
+func (h *OrderHandler) invalidateStatsCache(ctx context.Context) error {
+	if h.redisClient == nil {
+		return nil
+	}
+	prefix := redis.KeyPrefixStats + ":"
+	return h.redisClient.DeleteByPrefix(ctx, prefix)
 }
 
 // validateCreateOrderRequest валидирует запрос на создание заказа
@@ -419,13 +422,9 @@ func (h *OrderHandler) AutoAssignCourier(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	order, err := h.orderService.GetOrder(orderID)
+	order, err := h.orderService.GetOrder(r.Context(), orderID)
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			writeErrorResponse(w, http.StatusNotFound, "Order not found")
-		} else {
-			writeErrorResponse(w, http.StatusInternalServerError, "Failed to get order")
-		}
+		writeServiceError(w, h.log, err, "Failed to get order")
 		return
 	}
 
@@ -462,17 +461,9 @@ func (h *OrderHandler) AutoAssignCourier(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Автоматическое назначение курьера
-	courier, err := h.assignmentService.AutoAssignCourier(orderID, deliveryLat, deliveryLon)
+	courier, err := h.assignmentService.AutoAssignCourier(r.Context(), orderID, deliveryLat, deliveryLon)
 	if err != nil {
-		switch {
-		case strings.Contains(err.Error(), "not found"):
-			writeErrorResponse(w, http.StatusNotFound, err.Error())
-		case strings.Contains(err.Error(), "not in 'created' status") || strings.Contains(err.Error(), "already has assigned") || strings.Contains(err.Error(), "no available couriers") || strings.Contains(err.Error(), "no couriers with known location"):
-			writeErrorResponse(w, http.StatusBadRequest, err.Error())
-		default:
-			h.log.WithError(err).Error("Failed to auto-assign courier")
-			writeErrorResponse(w, http.StatusInternalServerError, "Failed to auto-assign courier")
-		}
+		writeServiceError(w, h.log, err, "Failed to auto-assign courier")
 		return
 	}
 
@@ -485,5 +476,17 @@ func (h *OrderHandler) AutoAssignCourier(w http.ResponseWriter, r *http.Request)
 	_ = h.redisClient.Delete(r.Context(), courierCacheKey)
 
 	h.log.WithField("order_id", orderID).WithField("courier_id", courier.ID).Info("Courier auto-assigned successfully")
+
+	// События назначения/смены статуса (best effort)
+	if err := h.producer.PublishCourierAssigned(orderID, courier.ID); err != nil {
+		h.log.WithError(err).Error("Failed to publish courier assigned event")
+	}
+	courierID := courier.ID
+	if err := h.producer.PublishOrderStatusChanged(orderID, models.OrderStatusCreated, models.OrderStatusAccepted, &courierID); err != nil {
+		h.log.WithError(err).Error("Failed to publish order status changed event")
+	}
+
 	writeJSONResponse(w, http.StatusOK, courier)
 }
+
+// Интерфейсы вынесены в interfaces.go

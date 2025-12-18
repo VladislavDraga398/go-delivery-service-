@@ -1,6 +1,7 @@
 package services
 
 import (
+	"context"
 	"database/sql"
 	"testing"
 	"time"
@@ -27,7 +28,7 @@ func TestCourierService_CreateCourier_Success(t *testing.T) {
 		WithArgs(sqlmock.AnyArg(), req.Name, req.Phone, models.CourierStatusOffline, 0.0, 0, sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
-	courier, err := service.CreateCourier(req)
+	courier, err := service.CreateCourier(context.Background(), req)
 	if err != nil {
 		t.Fatalf("expected success, got error: %v", err)
 	}
@@ -61,7 +62,7 @@ func TestCourierService_CreateCourier_DuplicatePhone(t *testing.T) {
 		WithArgs(sqlmock.AnyArg(), req.Name, req.Phone, models.CourierStatusOffline, 0.0, 0, sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnError(sql.ErrConnDone)
 
-	_, err := service.CreateCourier(req)
+	_, err := service.CreateCourier(context.Background(), req)
 	if err == nil {
 		t.Fatalf("expected error, got nil")
 	}
@@ -86,7 +87,7 @@ func TestCourierService_GetCourier_Success(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "phone", "status", "current_lat", "current_lon", "rating", "total_reviews", "created_at", "updated_at", "last_seen_at"}).
 			AddRow(courierID, "Bob", "+79998887766", models.CourierStatusAvailable, lat, lon, 4.5, 10, time.Now(), time.Now(), time.Now()))
 
-	courier, err := service.GetCourier(courierID)
+	courier, err := service.GetCourier(context.Background(), courierID)
 	if err != nil {
 		t.Fatalf("expected success, got error: %v", err)
 	}
@@ -113,7 +114,7 @@ func TestCourierService_GetCourier_NotFound(t *testing.T) {
 		WithArgs(courierID).
 		WillReturnError(sql.ErrNoRows)
 
-	_, err := service.GetCourier(courierID)
+	_, err := service.GetCourier(context.Background(), courierID)
 	if err == nil {
 		t.Fatalf("expected error, got nil")
 	}
@@ -142,7 +143,7 @@ func TestCourierService_UpdateCourierStatus_Success(t *testing.T) {
 		WithArgs(req.Status, req.CurrentLat, req.CurrentLon, sqlmock.AnyArg(), sqlmock.AnyArg(), courierID).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
-	err := service.UpdateCourierStatus(courierID, req)
+	err := service.UpdateCourierStatus(context.Background(), courierID, req)
 	if err != nil {
 		t.Fatalf("expected success, got error: %v", err)
 	}
@@ -168,7 +169,7 @@ func TestCourierService_UpdateCourierStatus_NotFound(t *testing.T) {
 		WithArgs(req.Status, req.CurrentLat, req.CurrentLon, sqlmock.AnyArg(), sqlmock.AnyArg(), courierID).
 		WillReturnResult(sqlmock.NewResult(1, 0))
 
-	err := service.UpdateCourierStatus(courierID, req)
+	err := service.UpdateCourierStatus(context.Background(), courierID, req)
 	if err == nil {
 		t.Fatalf("expected error, got nil")
 	}
@@ -204,7 +205,7 @@ func TestCourierService_AssignOrderToCourier_Success(t *testing.T) {
 
 	mock.ExpectCommit()
 
-	err := service.AssignOrderToCourier(orderID, courierID)
+	err := service.AssignOrderToCourier(context.Background(), orderID, courierID)
 	if err != nil {
 		t.Fatalf("expected success, got error: %v", err)
 	}
@@ -232,7 +233,7 @@ func TestCourierService_AssignOrderToCourier_CourierNotAvailable(t *testing.T) {
 
 	mock.ExpectRollback()
 
-	err := service.AssignOrderToCourier(orderID, courierID)
+	err := service.AssignOrderToCourier(context.Background(), orderID, courierID)
 	if err == nil {
 		t.Fatalf("expected error, got nil")
 	}
@@ -259,7 +260,7 @@ func TestCourierService_AssignOrderToCourier_CourierNotFound(t *testing.T) {
 
 	mock.ExpectRollback()
 
-	err := service.AssignOrderToCourier(orderID, courierID)
+	err := service.AssignOrderToCourier(context.Background(), orderID, courierID)
 	if err == nil {
 		t.Fatalf("expected error, got nil")
 	}
@@ -291,7 +292,7 @@ func TestCourierService_AssignOrderToCourier_OrderNotFound(t *testing.T) {
 
 	mock.ExpectRollback()
 
-	err := service.AssignOrderToCourier(orderID, courierID)
+	err := service.AssignOrderToCourier(context.Background(), orderID, courierID)
 	if err == nil {
 		t.Fatalf("expected error, got nil")
 	}
@@ -315,7 +316,7 @@ func TestCourierService_GetAvailableCouriers(t *testing.T) {
 		WithArgs(models.CourierStatusAvailable).
 		WillReturnRows(rows)
 
-	couriers, err := service.GetAvailableCouriers()
+	couriers, err := service.GetAvailableCouriers(context.Background())
 	if err != nil {
 		t.Fatalf("expected success, got error: %v", err)
 	}

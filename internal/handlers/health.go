@@ -6,25 +6,24 @@ import (
 	"net/http"
 	"time"
 
-	"delivery-system/internal/database"
-	"delivery-system/internal/redis"
-
 	"github.com/IBM/sarama"
 )
 
 // HealthHandler представляет обработчик для проверки здоровья системы
 type HealthHandler struct {
-	db           *database.DB
-	redisClient  *redis.Client
+	db           DBHealth
+	redisClient  RedisHealth
 	kafkaBrokers []string
+	kafkaCheck   func([]string) error
 }
 
 // NewHealthHandler создает новый обработчик здоровья
-func NewHealthHandler(db *database.DB, redisClient *redis.Client, kafkaBrokers []string) *HealthHandler {
+func NewHealthHandler(db DBHealth, redisClient RedisHealth, kafkaBrokers []string, kafkaCheck func([]string) error) *HealthHandler {
 	return &HealthHandler{
 		db:           db,
 		redisClient:  redisClient,
 		kafkaBrokers: kafkaBrokers,
+		kafkaCheck:   kafkaCheck,
 	}
 }
 
@@ -68,7 +67,12 @@ func (h *HealthHandler) Health(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Проверка Kafka
-	if err := checkKafkaHealth(h.kafkaBrokers); err != nil {
+	checkKafka := h.kafkaCheck
+	if checkKafka == nil {
+		checkKafka = checkKafkaHealth
+	}
+
+	if err := checkKafka(h.kafkaBrokers); err != nil {
 		services["kafka"] = "unhealthy: " + err.Error()
 		overallStatus = "unhealthy"
 	} else {
@@ -111,7 +115,12 @@ func (h *HealthHandler) Readiness(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := checkKafkaHealth(h.kafkaBrokers); err != nil {
+	kafkaCheck := h.kafkaCheck
+	if kafkaCheck == nil {
+		kafkaCheck = checkKafkaHealth
+	}
+
+	if err := kafkaCheck(h.kafkaBrokers); err != nil {
 		writeErrorResponse(w, http.StatusServiceUnavailable, "Kafka not ready")
 		return
 	}
@@ -152,4 +161,9 @@ func checkKafkaHealth(brokers []string) error {
 	defer client.Close()
 
 	return nil
+}
+
+// CheckKafkaHealth экспортирует проверку Kafka для использования вне пакета (например, в main и тестах).
+func CheckKafkaHealth(brokers []string) error {
+	return checkKafkaHealth(brokers)
 }

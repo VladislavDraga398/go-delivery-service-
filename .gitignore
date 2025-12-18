@@ -39,6 +39,7 @@ Thumbs.db
 
 # Application specific
 delivery-server
+server
 logs/
 *.log
 

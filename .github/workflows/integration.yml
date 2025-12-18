@@ -1,0 +1,57 @@
+name: Integration (docker-compose)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main", "dev"]
+
+permissions:
+  contents: read
+
+jobs:
+  compose:
+    name: docker compose up + health + KPI
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start stack
+        run: docker compose -f docker-compose.yml up -d --build
+
+      - name: Wait for health
+        run: |
+          set -e
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:8080/health > /tmp/health.json; then
+              echo "Health OK"
+              cat /tmp/health.json
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Health check failed"
+          docker compose -f docker-compose.yml ps
+          docker compose -f docker-compose.yml logs --no-color --tail=300
+          exit 1
+
+      - name: Check KPI endpoint
+        run: |
+          set -e
+          code=$(curl -s -o /tmp/kpi.json -w "%{http_code}" "http://localhost:8080/api/analytics/kpi?from=2024-01-01&to=2024-01-31&group_by=day")
+          if [ "$code" != "200" ]; then
+            echo "Expected 200, got $code"
+            cat /tmp/kpi.json || true
+            docker compose -f docker-compose.yml logs --no-color --tail=300
+            exit 1
+          fi
+          cat /tmp/kpi.json
+
+      - name: Dump compose logs (on failure)
+        if: failure()
+        run: docker compose -f docker-compose.yml logs --no-color --tail=500
+
+      - name: Shutdown
+        if: always()
+        run: docker compose -f docker-compose.yml down -v
+

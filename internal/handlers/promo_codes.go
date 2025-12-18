@@ -9,22 +9,23 @@ import (
 
 	"delivery-system/internal/logger"
 	"delivery-system/internal/models"
-	"delivery-system/internal/services"
 )
 
 // PromoHandler обрабатывает промокоды.
 type PromoHandler struct {
-	promoService *services.PromoService
+	promoService PromoService
 	log          *logger.Logger
 }
 
 // NewPromoHandler создаёт новый обработчик промокодов.
-func NewPromoHandler(promoService *services.PromoService, log *logger.Logger) *PromoHandler {
+func NewPromoHandler(promoService PromoService, log *logger.Logger) *PromoHandler {
 	return &PromoHandler{
 		promoService: promoService,
 		log:          log,
 	}
 }
+
+// Интерфейсы вынесены в interfaces.go
 
 // CreatePromoCode создаёт промокод.
 func (h *PromoHandler) CreatePromoCode(w http.ResponseWriter, r *http.Request) {
@@ -44,14 +45,9 @@ func (h *PromoHandler) CreatePromoCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	promo, err := h.promoService.CreatePromoCode(&req)
+	promo, err := h.promoService.CreatePromoCode(r.Context(), &req)
 	if err != nil {
-		if strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "between") || strings.Contains(err.Error(), "non-negative") {
-			writeErrorResponse(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		h.log.WithError(err).Error("Failed to create promo code")
-		writeErrorResponse(w, http.StatusInternalServerError, "Failed to create promo code")
+		writeServiceError(w, h.log, err, "Failed to create promo code")
 		return
 	}
 
@@ -78,7 +74,7 @@ func (h *PromoHandler) ListPromoCodes(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	promos, err := h.promoService.ListPromoCodes(limit, offset)
+	promos, err := h.promoService.ListPromoCodes(r.Context(), limit, offset)
 	if err != nil {
 		h.log.WithError(err).Error("Failed to list promo codes")
 		writeErrorResponse(w, http.StatusInternalServerError, "Failed to list promo codes")
@@ -101,14 +97,9 @@ func (h *PromoHandler) GetPromoCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	promo, err := h.promoService.GetPromoCode(code)
+	promo, err := h.promoService.GetPromoCode(r.Context(), code)
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			writeErrorResponse(w, http.StatusNotFound, err.Error())
-		} else {
-			h.log.WithError(err).Error("Failed to get promo code")
-			writeErrorResponse(w, http.StatusInternalServerError, "Failed to get promo code")
-		}
+		writeServiceError(w, h.log, err, "Failed to get promo code")
 		return
 	}
 
@@ -139,18 +130,9 @@ func (h *PromoHandler) UpdatePromoCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	promo, err := h.promoService.UpdatePromoCode(code, &req)
+	promo, err := h.promoService.UpdatePromoCode(r.Context(), code, &req)
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			writeErrorResponse(w, http.StatusNotFound, err.Error())
-			return
-		}
-		if strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "between") {
-			writeErrorResponse(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		h.log.WithError(err).Error("Failed to update promo code")
-		writeErrorResponse(w, http.StatusInternalServerError, "Failed to update promo code")
+		writeServiceError(w, h.log, err, "Failed to update promo code")
 		return
 	}
 
@@ -170,13 +152,8 @@ func (h *PromoHandler) DeletePromoCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.promoService.DeletePromoCode(code); err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			writeErrorResponse(w, http.StatusNotFound, err.Error())
-		} else {
-			h.log.WithError(err).Error("Failed to delete promo code")
-			writeErrorResponse(w, http.StatusInternalServerError, "Failed to delete promo code")
-		}
+	if err := h.promoService.DeletePromoCode(r.Context(), code); err != nil {
+		writeServiceError(w, h.log, err, "Failed to delete promo code")
 		return
 	}
 

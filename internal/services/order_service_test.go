@@ -1,6 +1,7 @@
 package services
 
 import (
+	"context"
 	"database/sql"
 	"testing"
 	"time"
@@ -59,7 +60,7 @@ func TestOrderService_CreateReview_Success(t *testing.T) {
 
 	mock.ExpectCommit()
 
-	review, err := service.CreateReview(orderID, req)
+	review, err := service.CreateReview(context.Background(), orderID, req)
 	if err != nil {
 		t.Fatalf("expected success, got error: %v", err)
 	}
@@ -89,7 +90,7 @@ func TestOrderService_CreateReview_OrderNotFound(t *testing.T) {
 		WillReturnError(sql.ErrNoRows)
 	mock.ExpectRollback()
 
-	if _, err := service.CreateReview(orderID, req); err == nil {
+	if _, err := service.CreateReview(context.Background(), orderID, req); err == nil {
 		t.Fatalf("expected error, got nil")
 	}
 
@@ -116,7 +117,7 @@ func TestOrderService_CreateReview_NotDelivered(t *testing.T) {
 			AddRow(courierID, models.OrderStatusCreated, sql.NullInt32{}))
 	mock.ExpectRollback()
 
-	if _, err := service.CreateReview(orderID, req); err == nil {
+	if _, err := service.CreateReview(context.Background(), orderID, req); err == nil {
 		t.Fatalf("expected error, got nil")
 	}
 
@@ -143,7 +144,7 @@ func TestOrderService_CreateReview_AlreadyExists(t *testing.T) {
 			AddRow(courierID, models.OrderStatusDelivered, sql.NullInt32{Valid: true, Int32: 5}))
 	mock.ExpectRollback()
 
-	if _, err := service.CreateReview(orderID, req); err == nil {
+	if _, err := service.CreateReview(context.Background(), orderID, req); err == nil {
 		t.Fatalf("expected error, got nil")
 	}
 
@@ -162,7 +163,7 @@ func TestOrderService_CreateReview_InvalidRating(t *testing.T) {
 	orderID := uuid.New()
 	req := &models.CreateReviewRequest{Rating: 6}
 
-	if _, err := service.CreateReview(orderID, req); err == nil {
+	if _, err := service.CreateReview(context.Background(), orderID, req); err == nil {
 		t.Fatalf("expected error for invalid rating")
 	}
 }
@@ -185,7 +186,7 @@ func TestOrderService_GetCourierReviews(t *testing.T) {
 		WithArgs(courierID, limit, offset).
 		WillReturnRows(rows)
 
-	reviews, err := service.GetCourierReviews(courierID, limit, offset)
+	reviews, err := service.GetCourierReviews(context.Background(), courierID, limit, offset)
 	if err != nil {
 		t.Fatalf("expected success, got error: %v", err)
 	}

@@ -1,14 +1,19 @@
 package services
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"math"
 	"time"
 
+	"delivery-system/internal/apperror"
 	"delivery-system/internal/database"
 	"delivery-system/internal/logger"
 	"delivery-system/internal/models"
+
+	"github.com/lib/pq"
 )
 
 // PromoService управляет промокодами и расчётом скидок.
@@ -26,9 +31,9 @@ func NewPromoService(db *database.DB, log *logger.Logger) *PromoService {
 }
 
 // CreatePromoCode создаёт новый промокод.
-func (s *PromoService) CreatePromoCode(req *models.CreatePromoCodeRequest) (*models.PromoCode, error) {
+func (s *PromoService) CreatePromoCode(ctx context.Context, req *models.CreatePromoCodeRequest) (*models.PromoCode, error) {
 	if err := validatePromoCodePayload(req.DiscountType, req.Amount); err != nil {
-		return nil, err
+		return nil, apperror.Validation(err.Error(), err)
 	}
 
 	promo := &models.PromoCode{
@@ -47,8 +52,12 @@ func (s *PromoService) CreatePromoCode(req *models.CreatePromoCodeRequest) (*mod
 		VALUES ($1, $2, $3, $4, 0, $5, $6, $7, $8)
 	`
 
-	_, err := s.db.Exec(query, promo.Code, promo.DiscountType, promo.Amount, promo.MaxUses, promo.ExpiresAt, promo.Active, promo.CreatedAt, promo.UpdatedAt)
+	_, err := s.db.ExecContext(ctx, query, promo.Code, promo.DiscountType, promo.Amount, promo.MaxUses, promo.ExpiresAt, promo.Active, promo.CreatedAt, promo.UpdatedAt)
 	if err != nil {
+		var pqErr *pq.Error
+		if errors.As(err, &pqErr) && pqErr.Code == "23505" {
+			return nil, apperror.Conflict("promo code already exists", err)
+		}
 		return nil, fmt.Errorf("failed to create promo code: %w", err)
 	}
 
@@ -57,9 +66,9 @@ func (s *PromoService) CreatePromoCode(req *models.CreatePromoCodeRequest) (*mod
 }
 
 // UpdatePromoCode обновляет параметры промокода.
-func (s *PromoService) UpdatePromoCode(code string, req *models.UpdatePromoCodeRequest) (*models.PromoCode, error) {
+func (s *PromoService) UpdatePromoCode(ctx context.Context, code string, req *models.UpdatePromoCodeRequest) (*models.PromoCode, error) {
 	if err := validatePromoCodePayload(req.DiscountType, req.Amount); err != nil {
-		return nil, err
+		return nil, apperror.Validation(err.Error(), err)
 	}
 
 	query := `
@@ -68,7 +77,7 @@ func (s *PromoService) UpdatePromoCode(code string, req *models.UpdatePromoCodeR
 		WHERE code = $7
 	`
 
-	result, err := s.db.Exec(query, req.DiscountType, req.Amount, req.MaxUses, req.ExpiresAt, req.Active, time.Now(), code)
+	result, err := s.db.ExecContext(ctx, query, req.DiscountType, req.Amount, req.MaxUses, req.ExpiresAt, req.Active, time.Now(), code)
 	if err != nil {
 		return nil, fmt.Errorf("failed to update promo code: %w", err)
 	}
@@ -78,15 +87,15 @@ func (s *PromoService) UpdatePromoCode(code string, req *models.UpdatePromoCodeR
 		return nil, fmt.Errorf("failed to get rows affected: %w", err)
 	}
 	if rows == 0 {
-		return nil, fmt.Errorf("promo code not found")
+		return nil, apperror.NotFound("promo code not found", nil)
 	}
 
-	return s.GetPromoCode(code)
+	return s.GetPromoCode(ctx, code)
 }
 
 // DeletePromoCode удаляет промокод.
-func (s *PromoService) DeletePromoCode(code string) error {
-	result, err := s.db.Exec("DELETE FROM promo_codes WHERE code = $1", code)
+func (s *PromoService) DeletePromoCode(ctx context.Context, code string) error {
+	result, err := s.db.ExecContext(ctx, "DELETE FROM promo_codes WHERE code = $1", code)
 	if err != nil {
 		return fmt.Errorf("failed to delete promo code: %w", err)
 	}
@@ -95,13 +104,13 @@ func (s *PromoService) DeletePromoCode(code string) error {
 		return fmt.Errorf("failed to get rows affected: %w", err)
 	}
 	if rows == 0 {
-		return fmt.Errorf("promo code not found")
+		return apperror.NotFound("promo code not found", nil)
 	}
 	return nil
 }
 
 // GetPromoCode возвращает промокод по коду.
-func (s *PromoService) GetPromoCode(code string) (*models.PromoCode, error) {
+func (s *PromoService) GetPromoCode(ctx context.Context, code string) (*models.PromoCode, error) {
 	query := `
 		SELECT code, discount_type, amount, max_uses, used_count, expires_at, active, created_at, updated_at
 		FROM promo_codes
@@ -109,12 +118,12 @@ func (s *PromoService) GetPromoCode(code string) (*models.PromoCode, error) {
 	`
 
 	promo := &models.PromoCode{}
-	if err := s.db.QueryRow(query, code).Scan(
+	if err := s.db.QueryRowContext(ctx, query, code).Scan(
 		&promo.Code, &promo.DiscountType, &promo.Amount, &promo.MaxUses, &promo.UsedCount,
 		&promo.ExpiresAt, &promo.Active, &promo.CreatedAt, &promo.UpdatedAt,
 	); err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("promo code not found")
+			return nil, apperror.NotFound("promo code not found", err)
 		}
 		return nil, fmt.Errorf("failed to get promo code: %w", err)
 	}
@@ -122,7 +131,7 @@ func (s *PromoService) GetPromoCode(code string) (*models.PromoCode, error) {
 }
 
 // ListPromoCodes возвращает список промокодов.
-func (s *PromoService) ListPromoCodes(limit, offset int) ([]*models.PromoCode, error) {
+func (s *PromoService) ListPromoCodes(ctx context.Context, limit, offset int) ([]*models.PromoCode, error) {
 	if limit <= 0 {
 		limit = 50
 	}
@@ -133,7 +142,7 @@ func (s *PromoService) ListPromoCodes(limit, offset int) ([]*models.PromoCode, e
 		LIMIT $1 OFFSET $2
 	`
 
-	rows, err := s.db.Query(query, limit, offset)
+	rows, err := s.db.QueryContext(ctx, query, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list promo codes: %w", err)
 	}
@@ -152,7 +161,7 @@ func (s *PromoService) ListPromoCodes(limit, offset int) ([]*models.PromoCode, e
 }
 
 // ApplyPromoWithTx рассчитывает скидку и увеличивает счётчик использования в рамках транзакции.
-func (s *PromoService) ApplyPromoWithTx(tx *sql.Tx, code string, itemsTotal, deliveryCost float64) (float64, error) {
+func (s *PromoService) ApplyPromoWithTx(ctx context.Context, tx *sql.Tx, code string, itemsTotal, deliveryCost float64) (float64, error) {
 	query := `
 		SELECT discount_type, amount, max_uses, used_count, expires_at, active
 		FROM promo_codes
@@ -169,23 +178,23 @@ func (s *PromoService) ApplyPromoWithTx(tx *sql.Tx, code string, itemsTotal, del
 		active       bool
 	)
 
-	if err := tx.QueryRow(query, code).Scan(&discountType, &amount, &maxUses, &usedCount, &expiresAt, &active); err != nil {
+	if err := tx.QueryRowContext(ctx, query, code).Scan(&discountType, &amount, &maxUses, &usedCount, &expiresAt, &active); err != nil {
 		if err == sql.ErrNoRows {
-			return 0, fmt.Errorf("promo code not found")
+			return 0, apperror.NotFound("promo code not found", err)
 		}
 		return 0, fmt.Errorf("failed to get promo code: %w", err)
 	}
 
 	if !active {
-		return 0, fmt.Errorf("promo code is inactive")
+		return 0, apperror.Conflict("promo code is inactive", nil)
 	}
 
 	if expiresAt != nil && expiresAt.Before(time.Now()) {
-		return 0, fmt.Errorf("promo code expired")
+		return 0, apperror.Conflict("promo code expired", nil)
 	}
 
 	if maxUses > 0 && usedCount >= maxUses {
-		return 0, fmt.Errorf("promo code usage limit reached")
+		return 0, apperror.Conflict("promo code usage limit reached", nil)
 	}
 
 	totalBase := itemsTotal + deliveryCost
@@ -196,7 +205,7 @@ func (s *PromoService) ApplyPromoWithTx(tx *sql.Tx, code string, itemsTotal, del
 		SET used_count = used_count + 1, updated_at = $1
 		WHERE code = $2
 	`
-	if _, err := tx.Exec(updateQuery, time.Now(), code); err != nil {
+	if _, err := tx.ExecContext(ctx, updateQuery, time.Now(), code); err != nil {
 		return 0, fmt.Errorf("failed to update promo usage: %w", err)
 	}
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -20,74 +21,119 @@ import (
 	"delivery-system/internal/services"
 )
 
+// Фабричные функции для подключения внешних сервисов (подменяемые в тестах).
+var (
+	dbConnect        = database.Connect
+	redisConnect     = redis.Connect
+	newKafkaProducer = kafka.NewProducer
+	newKafkaConsumer = kafka.NewConsumer
+	kafkaHealthCheck = handlers.CheckKafkaHealth
+	loadConfig       = config.Load
+	newLogger        = logger.New
+)
+
+// application агрегирует собранные зависимости.
+type application struct {
+	cfg      *config.Config
+	log      *logger.Logger
+	db       *database.DB
+	redis    *redis.Client
+	producer *kafka.Producer
+	consumer *kafka.Consumer
+	mux      *http.ServeMux
+	server   *http.Server
+}
+
 func main() {
-	// Загрузка конфигурации
-	cfg := config.Load()
-
-	// Инициализация логгера
-	log := logger.New(&cfg.Logger)
-	log.Info("Starting delivery system server...")
-
-	// Подключение к базе данных
-	db, err := database.Connect(&cfg.Database, log)
+	app, err := buildApplication()
 	if err != nil {
-		log.WithError(err).Fatal("Failed to connect to database")
+		fmt.Fprintf(os.Stderr, "failed to build app: %v\n", err)
+		os.Exit(1)
 	}
-	defer db.Close()
+	app.log.Info("Starting delivery system server...")
 
-	// Подключение к Redis
-	redisClient, err := redis.Connect(&cfg.Redis, log)
-	if err != nil {
-		log.WithError(err).Fatal("Failed to connect to Redis")
-	}
-	defer redisClient.Close()
-
-	// Создание Kafka producer
-	producer, err := kafka.NewProducer(&cfg.Kafka, log)
-	if err != nil {
-		log.WithError(err).Fatal("Failed to create Kafka producer")
-	}
-	defer producer.Close()
-
-	// Создание Kafka consumer
-	consumer, err := kafka.NewConsumer(&cfg.Kafka, log)
-	if err != nil {
-		log.WithError(err).Fatal("Failed to create Kafka consumer")
-	}
-	defer func() {
-		if err := consumer.Stop(); err != nil {
-			log.WithError(err).Warn("Failed to stop Kafka consumer gracefully")
+	go func() {
+		app.log.WithField("address", app.server.Addr).Info("HTTP server starting")
+		if err := app.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			app.log.WithError(err).Fatal("HTTP server failed")
 		}
 	}()
 
-	// Тарифы доставки
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	app.log.Info("Shutting down server...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_ = app.consumer.Stop()
+	if err := app.server.Shutdown(ctx); err != nil {
+		app.log.WithError(err).Error("Server forced to shutdown")
+	}
+	_ = app.producer.Close()
+	_ = app.redis.Close()
+	_ = app.db.Close()
+	app.log.Info("Server exited")
+}
+
+// buildApplication создает все зависимости (подменяемые в тестах).
+func buildApplication() (*application, error) {
+	cfg := loadConfig()
+	log := newLogger(&cfg.Logger)
+
+	db, err := dbConnect(&cfg.Database, log)
+	if err != nil {
+		return nil, fmt.Errorf("db connect: %w", err)
+	}
+
+	redisClient, err := redisConnect(&cfg.Redis, log)
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("redis connect: %w", err)
+	}
+
+	producer, err := newKafkaProducer(&cfg.Kafka, log)
+	if err != nil {
+		_ = redisClient.Close()
+		_ = db.Close()
+		return nil, fmt.Errorf("kafka producer: %w", err)
+	}
+
+	consumer, err := newKafkaConsumer(&cfg.Kafka, log)
+	if err != nil {
+		_ = producer.Close()
+		_ = redisClient.Close()
+		_ = db.Close()
+		return nil, fmt.Errorf("kafka consumer: %w", err)
+	}
+
 	pricingService := services.NewPricingService(cfg.Pricing.BaseFare, cfg.Pricing.PerKm, cfg.Pricing.MinFare)
 	promoService := services.NewPromoService(db, log)
 
-	// Инициализация сервисов
 	orderService := services.NewOrderService(db, log, pricingService, promoService)
 	courierService := services.NewCourierService(db, log)
 	assignmentService := services.NewCourierAssignmentService(db, courierService, orderService, log)
 	geocodingService := services.NewGeocodingService(redisClient, log, &cfg.Geocoding)
+	analyticsService := services.NewAnalyticsService(db, redisClient, log, &cfg.Analytics)
+	rateLimiter := services.NewRateLimiter(redisClient, log, &cfg.RateLimit)
 
-	// Инициализация handlers
 	orderHandler := handlers.NewOrderHandler(orderService, assignmentService, geocodingService, producer, redisClient, log)
 	courierHandler := handlers.NewCourierHandler(courierService, orderService, producer, redisClient, log)
 	promoHandler := handlers.NewPromoHandler(promoService, log)
-	healthHandler := handlers.NewHealthHandler(db, redisClient, cfg.Kafka.Brokers)
+	analyticsHandler := handlers.NewAnalyticsHandler(analyticsService, log, &cfg.Analytics)
+	healthHandler := handlers.NewHealthHandler(db, redisClient, cfg.Kafka.Brokers, kafkaHealthCheck)
+	rateLimitHandler := handlers.NewRateLimitHandler(rateLimiter, log, &cfg.RateLimit)
 
-	// Регистрация обработчиков событий Kafka
 	registerEventHandlers(consumer, log)
-
-	// Запуск Kafka consumer
 	if err := consumer.Start(); err != nil {
-		log.WithError(err).Fatal("Failed to start Kafka consumer")
+		_ = consumer.Stop()
+		_ = producer.Close()
+		_ = redisClient.Close()
+		_ = db.Close()
+		return nil, fmt.Errorf("kafka consumer start: %w", err)
 	}
 
-	// Настройка HTTP роутера
-	mux := setupRoutes(orderHandler, courierHandler, healthHandler, promoHandler)
-
-	// Создание HTTP сервера
+	mux := setupRoutes(orderHandler, courierHandler, healthHandler, promoHandler, analyticsHandler, rateLimitHandler, rateLimiter, log)
 	server := &http.Server{
 		Addr:         fmt.Sprintf("%s:%s", cfg.Server.Host, cfg.Server.Port),
 		Handler:      mux,
@@ -95,35 +141,25 @@ func main() {
 		WriteTimeout: time.Duration(cfg.Server.WriteTimeout) * time.Second,
 	}
 
-	// Запуск сервера в горутине
-	go func() {
-		log.WithField("address", server.Addr).Info("HTTP server starting")
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.WithError(err).Fatal("HTTP server failed")
-		}
-	}()
-
-	// Ожидание сигнала завершения
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-
-	log.Info("Shutting down server...")
-
-	// Graceful shutdown
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	if err := server.Shutdown(ctx); err != nil {
-		log.WithError(err).Error("Server forced to shutdown")
-	}
-
-	log.Info("Server exited")
+	return &application{
+		cfg:      cfg,
+		log:      log,
+		db:       db,
+		redis:    redisClient,
+		producer: producer,
+		consumer: consumer,
+		mux:      mux,
+		server:   server,
+	}, nil
 }
 
 // setupRoutes настраивает маршруты HTTP сервера
-func setupRoutes(orderHandler *handlers.OrderHandler, courierHandler *handlers.CourierHandler, healthHandler *handlers.HealthHandler, promoHandler *handlers.PromoHandler) *http.ServeMux {
+func setupRoutes(orderHandler *handlers.OrderHandler, courierHandler *handlers.CourierHandler, healthHandler *handlers.HealthHandler, promoHandler *handlers.PromoHandler, analyticsHandler *handlers.AnalyticsHandler, rateLimitHandler *handlers.RateLimitHandler, rateLimiter *services.RateLimiter, log *logger.Logger) *http.ServeMux {
 	mux := http.NewServeMux()
+
+	applyAPI := func(h http.HandlerFunc) http.HandlerFunc {
+		return corsMiddleware(handlers.RateLimitMiddleware(rateLimiter, log, h))
+	}
 
 	// Health check endpoints
 	mux.HandleFunc("/health", corsMiddleware(healthHandler.Health))
@@ -131,17 +167,24 @@ func setupRoutes(orderHandler *handlers.OrderHandler, courierHandler *handlers.C
 	mux.HandleFunc("/health/liveness", corsMiddleware(healthHandler.Liveness))
 
 	// Order endpoints
-	mux.HandleFunc("/api/orders", corsMiddleware(handleOrdersRoute(orderHandler)))
-	mux.HandleFunc("/api/orders/", corsMiddleware(handleOrderRoute(orderHandler)))
+	mux.HandleFunc("/api/orders", applyAPI(handleOrdersRoute(orderHandler)))
+	mux.HandleFunc("/api/orders/", applyAPI(handleOrderRoute(orderHandler)))
 
 	// Courier endpoints
-	mux.HandleFunc("/api/couriers", corsMiddleware(handleCouriersRoute(courierHandler)))
-	mux.HandleFunc("/api/couriers/", corsMiddleware(handleCourierRoute(courierHandler)))
-	mux.HandleFunc("/api/couriers/available", corsMiddleware(courierHandler.GetAvailableCouriers))
+	mux.HandleFunc("/api/couriers", applyAPI(handleCouriersRoute(courierHandler)))
+	mux.HandleFunc("/api/couriers/", applyAPI(handleCourierRoute(courierHandler)))
+	mux.HandleFunc("/api/couriers/available", applyAPI(courierHandler.GetAvailableCouriers))
 
 	// Promo codes endpoints
-	mux.HandleFunc("/api/promo-codes", corsMiddleware(handlePromoCodesRoute(promoHandler)))
-	mux.HandleFunc("/api/promo-codes/", corsMiddleware(handlePromoCodeRoute(promoHandler)))
+	mux.HandleFunc("/api/promo-codes", applyAPI(handlePromoCodesRoute(promoHandler)))
+	mux.HandleFunc("/api/promo-codes/", applyAPI(handlePromoCodeRoute(promoHandler)))
+
+	// Analytics endpoints
+	mux.HandleFunc("/api/analytics/kpi", applyAPI(analyticsHandler.GetKPIs))
+	mux.HandleFunc("/api/analytics/couriers", applyAPI(analyticsHandler.GetCourierAnalytics))
+
+	// Rate limit status
+	mux.HandleFunc("/api/rate-limit/status", applyAPI(rateLimitHandler.Status))
 
 	return mux
 }
@@ -310,7 +353,15 @@ func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func writeErrorResponse(w http.ResponseWriter, statusCode int, message string) {
+	type errorResponse struct {
+		Error   string `json:"error"`
+		Message string `json:"message"`
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
-	fmt.Fprintf(w, `{"error": "%s", "message": "%s"}`, http.StatusText(statusCode), message)
+	_ = json.NewEncoder(w).Encode(errorResponse{
+		Error:   http.StatusText(statusCode),
+		Message: message,
+	})
 }

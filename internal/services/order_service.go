@@ -1,10 +1,12 @@
 package services
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"time"
 
+	"delivery-system/internal/apperror"
 	"delivery-system/internal/database"
 	"delivery-system/internal/logger"
 	"delivery-system/internal/models"
@@ -31,13 +33,13 @@ func NewOrderService(db *database.DB, log *logger.Logger, pricing *PricingServic
 }
 
 // CreateOrder создает новый заказ
-func (s *OrderService) CreateOrder(req *models.CreateOrderRequest) (*models.Order, error) {
+func (s *OrderService) CreateOrder(ctx context.Context, req *models.CreateOrderRequest) (*models.Order, error) {
 	// Проверяем, что координаты присутствуют (должны быть после валидации/геокодирования)
 	if req.PickupLat == nil || req.PickupLon == nil || req.DeliveryLat == nil || req.DeliveryLon == nil {
-		return nil, fmt.Errorf("pickup and delivery coordinates are required for pricing")
+		return nil, apperror.Validation("pickup and delivery coordinates are required for pricing", nil)
 	}
 
-	tx, err := s.db.Begin()
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to begin transaction: %w", err)
 	}
@@ -57,10 +59,10 @@ func (s *OrderService) CreateOrder(req *models.CreateOrderRequest) (*models.Orde
 	var discountAmount float64
 	if req.PromoCode != nil && *req.PromoCode != "" {
 		if s.promo == nil {
-			return nil, fmt.Errorf("promo codes are not supported")
+			return nil, apperror.Validation("promo codes are not supported", nil)
 		}
 
-		discountAmount, err = s.promo.ApplyPromoWithTx(tx, *req.PromoCode, itemsTotal, deliveryCost)
+		discountAmount, err = s.promo.ApplyPromoWithTx(ctx, tx, *req.PromoCode, itemsTotal, deliveryCost)
 		if err != nil {
 			return nil, err
 		}
@@ -96,7 +98,7 @@ func (s *OrderService) CreateOrder(req *models.CreateOrderRequest) (*models.Orde
 		INSERT INTO orders (id, customer_name, customer_phone, delivery_address, pickup_address, pickup_lat, pickup_lon, delivery_lat, delivery_lon, total_amount, delivery_cost, discount_amount, promo_code, status, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 	`
-	_, err = tx.Exec(query, order.ID, order.CustomerName, order.CustomerPhone,
+	_, err = tx.ExecContext(ctx, query, order.ID, order.CustomerName, order.CustomerPhone,
 		order.DeliveryAddress, order.PickupAddress, order.PickupLat, order.PickupLon, order.DeliveryLat, order.DeliveryLon,
 		order.TotalAmount, order.DeliveryCost, order.DiscountAmount, order.PromoCode, order.Status, order.CreatedAt, order.UpdatedAt)
 	if err != nil {
@@ -110,7 +112,7 @@ func (s *OrderService) CreateOrder(req *models.CreateOrderRequest) (*models.Orde
 			INSERT INTO order_items (id, order_id, name, quantity, price)
 			VALUES ($1, $2, $3, $4, $5)
 		`
-		_, err = tx.Exec(itemQuery, itemID, orderID, item.Name, item.Quantity, item.Price)
+		_, err = tx.ExecContext(ctx, itemQuery, itemID, orderID, item.Name, item.Quantity, item.Price)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create order item: %w", err)
 		}
@@ -138,7 +140,7 @@ func (s *OrderService) CreateOrder(req *models.CreateOrderRequest) (*models.Orde
 }
 
 // GetOrder получает заказ по ID
-func (s *OrderService) GetOrder(orderID uuid.UUID) (*models.Order, error) {
+func (s *OrderService) GetOrder(ctx context.Context, orderID uuid.UUID) (*models.Order, error) {
 	order := &models.Order{}
 
 	query := `
@@ -148,7 +150,7 @@ func (s *OrderService) GetOrder(orderID uuid.UUID) (*models.Order, error) {
 		WHERE id = $1
 	`
 
-	err := s.db.QueryRow(query, orderID).Scan(
+	err := s.db.QueryRowContext(ctx, query, orderID).Scan(
 		&order.ID, &order.CustomerName, &order.CustomerPhone, &order.DeliveryAddress, &order.PickupAddress,
 		&order.PickupLat, &order.PickupLon, &order.DeliveryLat, &order.DeliveryLon, &order.TotalAmount, &order.DeliveryCost, &order.DiscountAmount, &order.PromoCode,
 		&order.Status, &order.CourierID, &order.Rating, &order.ReviewComment,
@@ -156,7 +158,7 @@ func (s *OrderService) GetOrder(orderID uuid.UUID) (*models.Order, error) {
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("order not found")
+			return nil, apperror.NotFound("order not found", err)
 		}
 		return nil, fmt.Errorf("failed to get order: %w", err)
 	}
@@ -168,7 +170,7 @@ func (s *OrderService) GetOrder(orderID uuid.UUID) (*models.Order, error) {
 		WHERE order_id = $1
 	`
 
-	rows, err := s.db.Query(itemsQuery, orderID)
+	rows, err := s.db.QueryContext(ctx, itemsQuery, orderID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get order items: %w", err)
 	}
@@ -186,12 +188,12 @@ func (s *OrderService) GetOrder(orderID uuid.UUID) (*models.Order, error) {
 }
 
 // CreateReview создает отзыв по заказу и обновляет рейтинг курьера
-func (s *OrderService) CreateReview(orderID uuid.UUID, req *models.CreateReviewRequest) (*models.Review, error) {
+func (s *OrderService) CreateReview(ctx context.Context, orderID uuid.UUID, req *models.CreateReviewRequest) (*models.Review, error) {
 	if req.Rating < 1 || req.Rating > 5 {
-		return nil, fmt.Errorf("rating must be between 1 and 5")
+		return nil, apperror.Validation("rating must be between 1 and 5", nil)
 	}
 
-	tx, err := s.db.Begin()
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to begin transaction: %w", err)
 	}
@@ -209,23 +211,23 @@ func (s *OrderService) CreateReview(orderID uuid.UUID, req *models.CreateReviewR
 		FOR UPDATE
 	`
 
-	if err := tx.QueryRow(query, orderID).Scan(&courierID, &status, &existingRating); err != nil {
+	if err := tx.QueryRowContext(ctx, query, orderID).Scan(&courierID, &status, &existingRating); err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("order not found")
+			return nil, apperror.NotFound("order not found", err)
 		}
 		return nil, fmt.Errorf("failed to fetch order for review: %w", err)
 	}
 
 	if courierID == uuid.Nil {
-		return nil, fmt.Errorf("order has no assigned courier")
+		return nil, apperror.Conflict("order has no assigned courier", nil)
 	}
 
 	if status != models.OrderStatusDelivered {
-		return nil, fmt.Errorf("order is not delivered yet")
+		return nil, apperror.Conflict("order is not delivered yet", nil)
 	}
 
 	if existingRating.Valid {
-		return nil, fmt.Errorf("review already exists for this order")
+		return nil, apperror.Conflict("review already exists for this order", nil)
 	}
 
 	reviewID := uuid.New()
@@ -242,7 +244,7 @@ func (s *OrderService) CreateReview(orderID uuid.UUID, req *models.CreateReviewR
 		INSERT INTO reviews (id, order_id, courier_id, rating, comment, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6)
 	`
-	if _, err := tx.Exec(insertReviewQuery, review.ID, review.OrderID, review.CourierID, review.Rating, review.Comment, review.CreatedAt); err != nil {
+	if _, err := tx.ExecContext(ctx, insertReviewQuery, review.ID, review.OrderID, review.CourierID, review.Rating, review.Comment, review.CreatedAt); err != nil {
 		return nil, fmt.Errorf("failed to insert review: %w", err)
 	}
 
@@ -251,7 +253,7 @@ func (s *OrderService) CreateReview(orderID uuid.UUID, req *models.CreateReviewR
 		SET rating = $1, review_comment = $2, updated_at = $3
 		WHERE id = $4
 	`
-	if _, err := tx.Exec(updateOrderQuery, review.Rating, review.Comment, time.Now(), orderID); err != nil {
+	if _, err := tx.ExecContext(ctx, updateOrderQuery, review.Rating, review.Comment, time.Now(), orderID); err != nil {
 		return nil, fmt.Errorf("failed to update order with review: %w", err)
 	}
 
@@ -269,7 +271,7 @@ func (s *OrderService) CreateReview(orderID uuid.UUID, req *models.CreateReviewR
 }
 
 // UpdateOrderStatus обновляет статус заказа
-func (s *OrderService) UpdateOrderStatus(orderID uuid.UUID, req *models.UpdateOrderStatusRequest) error {
+func (s *OrderService) UpdateOrderStatus(ctx context.Context, orderID uuid.UUID, req *models.UpdateOrderStatusRequest) error {
 	query := `
 		UPDATE orders 
 		SET status = $1, courier_id = $2, updated_at = $3
@@ -287,7 +289,7 @@ func (s *OrderService) UpdateOrderStatus(orderID uuid.UUID, req *models.UpdateOr
 		args = append(args, orderID)
 	}
 
-	result, err := s.db.Exec(query, args...)
+	result, err := s.db.ExecContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("failed to update order status: %w", err)
 	}
@@ -298,7 +300,7 @@ func (s *OrderService) UpdateOrderStatus(orderID uuid.UUID, req *models.UpdateOr
 	}
 
 	if rowsAffected == 0 {
-		return fmt.Errorf("order not found")
+		return apperror.NotFound("order not found", nil)
 	}
 
 	s.log.WithFields(map[string]interface{}{
@@ -311,7 +313,7 @@ func (s *OrderService) UpdateOrderStatus(orderID uuid.UUID, req *models.UpdateOr
 }
 
 // GetOrders получает список заказов с фильтрацией
-func (s *OrderService) GetOrders(status *models.OrderStatus, courierID *uuid.UUID, limit, offset int) ([]*models.Order, error) {
+func (s *OrderService) GetOrders(ctx context.Context, status *models.OrderStatus, courierID *uuid.UUID, limit, offset int) ([]*models.Order, error) {
 	query := `
 		SELECT id, customer_name, customer_phone, delivery_address, pickup_address, pickup_lat, pickup_lon, delivery_lat, delivery_lon, total_amount, delivery_cost, discount_amount, promo_code,
 		       status, courier_id, rating, review_comment, created_at, updated_at, delivered_at
@@ -346,7 +348,7 @@ func (s *OrderService) GetOrders(status *models.OrderStatus, courierID *uuid.UUI
 		args = append(args, offset)
 	}
 
-	rows, err := s.db.Query(query, args...)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get orders: %w", err)
 	}
@@ -369,7 +371,7 @@ func (s *OrderService) GetOrders(status *models.OrderStatus, courierID *uuid.UUI
 }
 
 // GetCourierReviews возвращает отзывы по курьеру
-func (s *OrderService) GetCourierReviews(courierID uuid.UUID, limit, offset int) ([]*models.Review, error) {
+func (s *OrderService) GetCourierReviews(ctx context.Context, courierID uuid.UUID, limit, offset int) ([]*models.Review, error) {
 	query := `
 		SELECT id, order_id, courier_id, rating, comment, created_at
 		FROM reviews
@@ -378,7 +380,7 @@ func (s *OrderService) GetCourierReviews(courierID uuid.UUID, limit, offset int)
 		LIMIT $2 OFFSET $3
 	`
 
-	rows, err := s.db.Query(query, courierID, limit, offset)
+	rows, err := s.db.QueryContext(ctx, query, courierID, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get courier reviews: %w", err)
 	}
