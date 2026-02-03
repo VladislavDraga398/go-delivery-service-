@@ -184,6 +184,10 @@ func (s *OrderService) GetOrder(ctx context.Context, orderID uuid.UUID) (*models
 		order.Items = append(order.Items, item)
 	}
 
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate order items: %w", err)
+	}
+
 	return order, nil
 }
 
@@ -272,24 +276,65 @@ func (s *OrderService) CreateReview(ctx context.Context, orderID uuid.UUID, req 
 
 // UpdateOrderStatus обновляет статус заказа
 func (s *OrderService) UpdateOrderStatus(ctx context.Context, orderID uuid.UUID, req *models.UpdateOrderStatusRequest) error {
-	query := `
-		UPDATE orders 
-		SET status = $1, courier_id = $2, updated_at = $3
-	`
-	args := []interface{}{req.Status, req.CourierID, time.Now()}
-
-	// Если статус "доставлен", устанавливаем время доставки
-	if req.Status == models.OrderStatusDelivered {
-		query += ", delivered_at = $4"
-		args = append(args, time.Now())
-		query += " WHERE id = $5"
-		args = append(args, orderID)
-	} else {
-		query += " WHERE id = $4"
-		args = append(args, orderID)
+	if req == nil || req.Status == "" {
+		return apperror.Validation("status is required", nil)
 	}
 
-	result, err := s.db.ExecContext(ctx, query, args...)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var (
+		currentStatus      models.OrderStatus
+		currentCourierID   *uuid.UUID
+		currentDeliveredAt sql.NullTime
+	)
+
+	selectQuery := `
+		SELECT status, courier_id, delivered_at
+		FROM orders
+		WHERE id = $1
+		FOR UPDATE
+	`
+	if err := tx.QueryRowContext(ctx, selectQuery, orderID).Scan(&currentStatus, &currentCourierID, &currentDeliveredAt); err != nil {
+		if err == sql.ErrNoRows {
+			return apperror.NotFound("order not found", err)
+		}
+		return fmt.Errorf("failed to fetch order status: %w", err)
+	}
+
+	if !isValidOrderStatusTransition(currentStatus, req.Status) {
+		return apperror.Conflict("invalid order status transition", nil)
+	}
+
+	newCourierID := currentCourierID
+	if req.CourierID != nil {
+		if *req.CourierID == uuid.Nil {
+			return apperror.Validation("courier_id must be a valid UUID", nil)
+		}
+		newCourierID = req.CourierID
+	}
+
+	now := time.Now()
+	var deliveredAt sql.NullTime
+	if req.Status == models.OrderStatusDelivered {
+		if currentStatus == models.OrderStatusDelivered && currentDeliveredAt.Valid {
+			deliveredAt = currentDeliveredAt
+		} else {
+			deliveredAt = sql.NullTime{Time: now, Valid: true}
+		}
+	} else {
+		deliveredAt = sql.NullTime{Valid: false}
+	}
+
+	updateQuery := `
+		UPDATE orders
+		SET status = $1, courier_id = $2, updated_at = $3, delivered_at = $4
+		WHERE id = $5
+	`
+	result, err := tx.ExecContext(ctx, updateQuery, req.Status, newCourierID, now, deliveredAt, orderID)
 	if err != nil {
 		return fmt.Errorf("failed to update order status: %w", err)
 	}
@@ -303,10 +348,14 @@ func (s *OrderService) UpdateOrderStatus(ctx context.Context, orderID uuid.UUID,
 		return apperror.NotFound("order not found", nil)
 	}
 
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit order status update: %w", err)
+	}
+
 	s.log.WithFields(map[string]interface{}{
 		"order_id":   orderID,
 		"new_status": req.Status,
-		"courier_id": req.CourierID,
+		"courier_id": newCourierID,
 	}).Info("Order status updated")
 
 	return nil
@@ -367,6 +416,10 @@ func (s *OrderService) GetOrders(ctx context.Context, status *models.OrderStatus
 		orders = append(orders, order)
 	}
 
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate orders: %w", err)
+	}
+
 	return orders, nil
 }
 
@@ -395,5 +448,31 @@ func (s *OrderService) GetCourierReviews(ctx context.Context, courierID uuid.UUI
 		reviews = append(reviews, review)
 	}
 
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate reviews: %w", err)
+	}
+
 	return reviews, nil
+}
+
+func isValidOrderStatusTransition(from, to models.OrderStatus) bool {
+	if from == to {
+		return true
+	}
+	switch from {
+	case models.OrderStatusCreated:
+		return to == models.OrderStatusAccepted || to == models.OrderStatusCancelled
+	case models.OrderStatusAccepted:
+		return to == models.OrderStatusPreparing || to == models.OrderStatusCancelled
+	case models.OrderStatusPreparing:
+		return to == models.OrderStatusReady || to == models.OrderStatusCancelled
+	case models.OrderStatusReady:
+		return to == models.OrderStatusInDelivery || to == models.OrderStatusCancelled
+	case models.OrderStatusInDelivery:
+		return to == models.OrderStatusDelivered || to == models.OrderStatusCancelled
+	case models.OrderStatusDelivered, models.OrderStatusCancelled:
+		return false
+	default:
+		return false
+	}
 }

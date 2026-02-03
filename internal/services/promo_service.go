@@ -157,6 +157,10 @@ func (s *PromoService) ListPromoCodes(ctx context.Context, limit, offset int) ([
 		promos = append(promos, p)
 	}
 
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate promo codes: %w", err)
+	}
+
 	return promos, nil
 }
 

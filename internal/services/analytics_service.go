@@ -151,6 +151,10 @@ func (s *AnalyticsService) GetCourierAnalytics(ctx context.Context, filter *mode
 		result = append(result, item)
 	}
 
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate courier analytics: %w", err)
+	}
+
 	s.saveToCache(ctx, cacheKey, result)
 	return result, nil
 }
@@ -224,6 +228,10 @@ func (s *AnalyticsService) fetchKPIPeriods(ctx context.Context, filter *models.A
 		result = append(result, item)
 	}
 
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate KPI periods: %w", err)
+	}
+
 	return result, nil
 }
 
@@ -253,6 +261,10 @@ func (s *AnalyticsService) fetchTopItems(ctx context.Context, filter *models.Ana
 			return nil, fmt.Errorf("failed to scan top item: %w", err)
 		}
 		result = append(result, item)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate top items: %w", err)
 	}
 
 	return result, nil

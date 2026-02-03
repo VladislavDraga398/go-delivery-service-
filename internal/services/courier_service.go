@@ -185,6 +185,10 @@ func (s *CourierService) GetCouriers(ctx context.Context, status *models.Courier
 		couriers = append(couriers, courier)
 	}
 
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate couriers: %w", err)
+	}
+
 	return couriers, nil
 }
 

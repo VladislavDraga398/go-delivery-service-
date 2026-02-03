@@ -142,9 +142,17 @@ func TestOrderService_UpdateOrderStatus_Success(t *testing.T) {
 		CourierID: &courierID,
 	}
 
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT status, courier_id, delivered_at FROM orders").
+		WithArgs(orderID).
+		WillReturnRows(sqlmock.NewRows([]string{"status", "courier_id", "delivered_at"}).
+			AddRow(models.OrderStatusReady, nil, nil))
+
 	mock.ExpectExec("UPDATE orders SET status").
-		WithArgs(req.Status, req.CourierID, sqlmock.AnyArg(), orderID).
+		WithArgs(req.Status, req.CourierID, sqlmock.AnyArg(), sqlmock.AnyArg(), orderID).
 		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	mock.ExpectCommit()
 
 	err := service.UpdateOrderStatus(context.Background(), orderID, req)
 	if err != nil {
@@ -170,9 +178,17 @@ func TestOrderService_UpdateOrderStatus_Delivered(t *testing.T) {
 		CourierID: &courierID,
 	}
 
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT status, courier_id, delivered_at FROM orders").
+		WithArgs(orderID).
+		WillReturnRows(sqlmock.NewRows([]string{"status", "courier_id", "delivered_at"}).
+			AddRow(models.OrderStatusInDelivery, courierID, nil))
+
 	mock.ExpectExec("UPDATE orders SET status").
 		WithArgs(req.Status, req.CourierID, sqlmock.AnyArg(), sqlmock.AnyArg(), orderID).
 		WillReturnResult(sqlmock.NewResult(1, 1))
+
+	mock.ExpectCommit()
 
 	err := service.UpdateOrderStatus(context.Background(), orderID, req)
 	if err != nil {
@@ -196,9 +212,11 @@ func TestOrderService_UpdateOrderStatus_NotFound(t *testing.T) {
 		Status: models.OrderStatusCancelled,
 	}
 
-	mock.ExpectExec("UPDATE orders SET status").
-		WithArgs(req.Status, req.CourierID, sqlmock.AnyArg(), orderID).
-		WillReturnResult(sqlmock.NewResult(1, 0))
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT status, courier_id, delivered_at FROM orders").
+		WithArgs(orderID).
+		WillReturnError(sql.ErrNoRows)
+	mock.ExpectRollback()
 
 	err := service.UpdateOrderStatus(context.Background(), orderID, req)
 	if err == nil {
