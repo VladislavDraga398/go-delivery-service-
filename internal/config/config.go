@@ -8,11 +8,15 @@ import (
 
 // Config представляет конфигурацию приложения
 type Config struct {
-	Server   ServerConfig   `json:"server"`
-	Database DatabaseConfig `json:"database"`
-	Redis    RedisConfig    `json:"redis"`
-	Kafka    KafkaConfig    `json:"kafka"`
-	Logger   LoggerConfig   `json:"logger"`
+	Server    ServerConfig    `json:"server"`
+	Database  DatabaseConfig  `json:"database"`
+	Redis     RedisConfig     `json:"redis"`
+	Kafka     KafkaConfig     `json:"kafka"`
+	Logger    LoggerConfig    `json:"logger"`
+	Geocoding GeocodingConfig `json:"geocoding"`
+	Pricing   PricingConfig   `json:"pricing"`
+	Analytics AnalyticsConfig `json:"analytics"`
+	RateLimit RateLimitConfig `json:"rate_limit"`
 }
 
 // ServerConfig представляет конфигурацию HTTP сервера
@@ -62,6 +66,39 @@ type LoggerConfig struct {
 	File   string `json:"file"`
 }
 
+// GeocodingConfig описывает настройки геокодера
+type GeocodingConfig struct {
+	Provider       string `json:"provider"`        // offline | yandex
+	YandexAPIKey   string `json:"yandex_api_key"`  // Ключ для Yandex геокодера
+	YandexBaseURL  string `json:"yandex_base_url"` // https://geocode-maps.yandex.ru/1.x
+	TimeoutSeconds int    `json:"timeout_seconds"` // таймаут http-запроса
+}
+
+// PricingConfig хранит тарифы для доставки
+type PricingConfig struct {
+	BaseFare float64 `json:"base_fare"`
+	PerKm    float64 `json:"per_km"`
+	MinFare  float64 `json:"min_fare"`
+}
+
+// AnalyticsConfig хранит настройки аналитики
+type AnalyticsConfig struct {
+	CacheTTLMinutes       int    `json:"cache_ttl_minutes"`
+	MaxRangeDays          int    `json:"max_range_days"`
+	DefaultGroupBy        string `json:"default_group_by"`
+	DefaultTopLimit       int    `json:"default_top_limit"`
+	DefaultCourierLimit   int    `json:"default_courier_limit"`
+	RequestTimeoutSeconds int    `json:"request_timeout_seconds"`
+}
+
+// RateLimitConfig описывает настройки rate limiting
+type RateLimitConfig struct {
+	Enabled       bool   `json:"enabled"`
+	Requests      int    `json:"requests"`
+	WindowSeconds int    `json:"window_seconds"`
+	KeyPrefix     string `json:"key_prefix"`
+}
+
 // Load загружает конфигурацию из переменных окружения
 func Load() *Config {
 	return &Config{
@@ -99,6 +136,31 @@ func Load() *Config {
 			Format: getEnv("LOG_FORMAT", "json"),
 			File:   getEnv("LOG_FILE", ""),
 		},
+		Geocoding: GeocodingConfig{
+			Provider:       getEnv("GEOCODER_PROVIDER", "offline"),
+			YandexAPIKey:   getEnv("YANDEX_GEOCODER_API_KEY", ""),
+			YandexBaseURL:  getEnv("YANDEX_GEOCODER_BASE_URL", "https://geocode-maps.yandex.ru/1.x"),
+			TimeoutSeconds: getEnvAsInt("GEOCODER_TIMEOUT_SECONDS", 5),
+		},
+		Pricing: PricingConfig{
+			BaseFare: getEnvAsFloat("PRICING_BASE_FARE", 100.0),
+			PerKm:    getEnvAsFloat("PRICING_PER_KM", 20.0),
+			MinFare:  getEnvAsFloat("PRICING_MIN_FARE", 150.0),
+		},
+		Analytics: AnalyticsConfig{
+			CacheTTLMinutes:       getEnvAsInt("ANALYTICS_CACHE_TTL_MINUTES", 10),
+			MaxRangeDays:          getEnvAsInt("ANALYTICS_MAX_RANGE_DAYS", 365),
+			DefaultGroupBy:        getEnv("ANALYTICS_DEFAULT_GROUP_BY", "none"),
+			DefaultTopLimit:       getEnvAsInt("ANALYTICS_DEFAULT_TOP_LIMIT", 5),
+			DefaultCourierLimit:   getEnvAsInt("ANALYTICS_DEFAULT_COURIER_LIMIT", 50),
+			RequestTimeoutSeconds: getEnvAsInt("ANALYTICS_REQUEST_TIMEOUT_SECONDS", 5),
+		},
+		RateLimit: RateLimitConfig{
+			Enabled:       getEnvAsBool("RATE_LIMIT_ENABLED", false),
+			Requests:      getEnvAsInt("RATE_LIMIT_REQUESTS", 100),
+			WindowSeconds: getEnvAsInt("RATE_LIMIT_WINDOW_SECONDS", 60),
+			KeyPrefix:     getEnv("RATE_LIMIT_KEY_PREFIX", "ratelimit"),
+		},
 	}
 }
 
@@ -115,6 +177,27 @@ func getEnvAsInt(key string, defaultValue int) int {
 	valueStr := getEnv(key, "")
 	if value, err := strconv.Atoi(valueStr); err == nil {
 		return value
+	}
+	return defaultValue
+}
+
+// getEnvAsFloat получает значение переменной окружения как float64 с значением по умолчанию
+func getEnvAsFloat(key string, defaultValue float64) float64 {
+	valueStr := getEnv(key, "")
+	if value, err := strconv.ParseFloat(valueStr, 64); err == nil {
+		return value
+	}
+	return defaultValue
+}
+
+// getEnvAsBool получает значение переменной окружения как bool с значением по умолчанию
+func getEnvAsBool(key string, defaultValue bool) bool {
+	valueStr := strings.ToLower(getEnv(key, ""))
+	if valueStr == "true" || valueStr == "1" || valueStr == "yes" {
+		return true
+	}
+	if valueStr == "false" || valueStr == "0" || valueStr == "no" {
+		return false
 	}
 	return defaultValue
 }

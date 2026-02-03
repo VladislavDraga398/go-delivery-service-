@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: ["**"]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test + Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        continue-on-error: true
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Go toolchain sanity
+        run: |
+          set -e
+          if ! command -v go >/dev/null 2>&1; then
+            echo "go binary not found on runner and actions/setup-go failed."
+            echo "Re-run the workflow or check GitHub Actions network status."
+            exit 1
+          fi
+          go version
+          echo "GOFLAGS=$(go env GOFLAGS)"
+
+      - name: Go fmt check
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed on:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Go vet
+        run: go vet ./...
+
+      - name: Run tests with coverage (excluding cmd/server from gate)
+        env:
+          GOFLAGS: ""
+        run: |
+          set -e
+          echo "GOFLAGS=$(go env GOFLAGS)"
+          packages=$(go list ./... | grep -v '^delivery-system/cmd/server$' | tr '\n' ' ')
+          echo "Coverage packages: $packages"
+          go test -count=1 -coverprofile=coverage.out $packages
+
+          # cmd/server is a wiring/main package; run its tests, but don't include it in the coverage gate
+          # to avoid rare CI flakiness where main-package tests are reported as 0.0%.
+          go test -count=1 ./cmd/server
+          # Debug info for flaky runs: show package totals and final total
+          go tool cover -func=coverage.out | tail -n 20
+
+      - name: Enforce coverage threshold
+        env:
+          MIN_COVERAGE: "82.0"
+        run: |
+          total=$(go tool cover -func=coverage.out | awk '/^total:/{gsub("%","",$3); print $3}')
+          echo "Total coverage: ${total}% (min ${MIN_COVERAGE}%)"
+          awk -v total="$total" -v min="$MIN_COVERAGE" 'BEGIN { exit (total+0 < min+0) ? 1 : 0 }'
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out

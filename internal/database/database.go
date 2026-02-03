@@ -43,10 +43,16 @@ func Connect(cfg *config.DatabaseConfig, log *logger.Logger) (*DB, error) {
 
 // Close закрывает подключение к базе данных
 func (db *DB) Close() error {
+	if db == nil || db.DB == nil {
+		return nil
+	}
 	return db.DB.Close()
 }
 
 // Health проверяет состояние базы данных
 func (db *DB) Health() error {
+	if db == nil || db.DB == nil {
+		return fmt.Errorf("database not initialized")
+	}
 	return db.Ping()
 }

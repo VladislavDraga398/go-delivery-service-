@@ -202,7 +202,7 @@ GET /api/couriers/{courier_id}
 
 #### Получение списка курьеров
 ```http
-GET /api/couriers?status=available&limit=20&offset=0
+GET /api/couriers?status=available&min_rating=4.5&limit=20&offset=0
 ```
 
 #### Получение доступных курьеров
@@ -553,12 +553,164 @@ delivery-system/
 - Отчеты генерируются быстро благодаря кешированию
 - Данные можно экспортировать в JSON/CSV формате для дальнейшего анализа
 
----
 
-## 📄 Лицензия
-
-Этот проект создан в образовательных целях и распространяется под лицензией MIT.
 
 ---
 
-**Удачи в изучении и разработке! 🚀** 
+## Отчёт по реализации ТЗ (1–5)
+
+Этот раздел — итог для ревьюера: что реализовано по пунктам 1–5, где это находится в коде и как быстро проверить.
+Примечание: последующие блоки `Уже реализованно/Не реализовано/Статус реализации...` оставлены как часть исходного README и могут быть неактуальны — ориентируйтесь на этот отчёт.
+
+### 1) Рейтинги и отзывы
+- **БД/данные**: `reviews`, `couriers.rating/total_reviews`, `orders.rating/review_comment`, триггер пересчёта рейтинга (`migrations/002_reviews.up.sql`).
+- **API**: `POST /api/orders/{id}/review`, `GET /api/couriers/{id}/reviews` (роуты в `cmd/server/main.go`).
+- **Логика**: рейтинг 1–5, отзыв только после `delivered`, запрет повторного отзыва (`internal/services/order_service.go`).
+
+### 2) Автоназначение курьера
+- **API**: `POST /api/orders/{id}/auto-assign` + `auto_assign` в `POST /api/orders` (`internal/handlers/orders.go`).
+- **Алгоритм**: scoring по расстоянию/рейтингу/нагрузке (веса `0.40/0.30/0.30`) (`internal/services/courier_assignment_service.go`).
+- **Kafka**: при автоназначении и ручном назначении публикуются `courier.assigned` и `order.status_changed` (best effort) (`internal/handlers/orders.go`, `internal/handlers/couriers.go`).
+
+### 3) Стоимость доставки и геокодинг
+- **Расчёт**: distance (haversine) → `PricingService.CalculateCost` (base/per_km/min_fare) (`internal/services/pricing_service.go`, `internal/services/order_service.go`).
+- **Геокодер**: `offline` или `yandex` (опционально), кеш в Redis (`internal/services/geocoding_service.go`).
+- **Контракт API**: `pickup_address` обязателен при создании заказа (валидация в `internal/handlers/orders.go`).
+
+### 4) Промокоды и скидки
+- **БД**: `promo_codes` + поля `orders.promo_code/discount_amount` (`migrations/004_promo_codes.up.sql`).
+- **API**: `/api/promo-codes` (CRUD) (`internal/handlers/promo_codes.go`).
+- **Логика**: применение скидки в транзакции (`SELECT ... FOR UPDATE` + `used_count++`) (`internal/services/promo_service.go`, `internal/services/order_service.go`).
+
+### 5) Аналитика
+- **API**: `/api/analytics/kpi`, `/api/analytics/couriers` (JSON/CSV через `format=csv`) (`internal/handlers/analytics.go`).
+- **Кеш**: кеширование в Redis + инвалидация stats-cache при смене статуса заказа и при создании review (best effort) (`internal/services/analytics_service.go`, `internal/handlers/orders.go`).
+
+## Как проверить (сценарий для ТЗ 1–5)
+
+Ниже шаги идут в **логическом порядке проверки**, а в заголовках указано, к какому пункту ТЗ относится шаг.
+
+### Шаг 1 — Поднять окружение (Kafka/Redis/PostgreSQL)
+```bash
+make up && make health
+
+# Ожидаем 200 и status=healthy
+curl -s -i http://localhost:8080/health
+```
+
+### Шаг 2 — ТЗ‑2: Подготовить курьера с локацией (нужно для автоназначения)
+```bash
+phone="+7999$(date +%H%M%S)"
+courier_id=$(curl -s -X POST http://localhost:8080/api/couriers \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Иван","phone":"'"$phone"'"}' | jq -r .id)
+
+curl -s -X PUT "http://localhost:8080/api/couriers/${courier_id}/status" \
+  -H "Content-Type: application/json" \
+  -d '{"status":"available","current_lat":55.7558,"current_lon":37.6173}' | jq
+```
+
+### Шаг 3 — ТЗ‑4: Создать промокод (опционально)
+```bash
+promo_code="SALE$(date +%H%M%S)"
+curl -s -X POST http://localhost:8080/api/promo-codes \
+  -H "Content-Type: application/json" \
+  -d '{"code":"'"$promo_code"'","discount_type":"percent","amount":10,"max_uses":10,"active":true}' | jq
+```
+
+### Шаг 4 — ТЗ‑3 (+ТЗ‑2): Создать заказ (геокодинг + стоимость) и автоназначить курьера
+```bash
+resp=$(curl -s -X POST http://localhost:8080/api/orders \
+  -H "Content-Type: application/json" \
+  -d '{
+    "customer_name":"Анна",
+    "customer_phone":"+79990000002",
+    "pickup_address":"Москва, склад №1",
+    "delivery_address":"Москва, ул. Ленина, 10",
+    "items":[{"name":"Пицца","quantity":1,"price":500}],
+    "promo_code":"'"$promo_code"'",
+    "auto_assign":true
+  }')
+
+echo "$resp" | jq
+order_id=$(echo "$resp" | jq -r '.order.id')
+assigned_courier_id=$(echo "$resp" | jq -r '.assigned_courier.id')
+
+# Если автоназначение не сработало (например, нет available курьеров), назначаем вручную через /auto-assign:
+if [ -z "$assigned_courier_id" ] || [ "$assigned_courier_id" = "null" ]; then
+  assigned_courier_id=$(curl -s -X POST "http://localhost:8080/api/orders/${order_id}/auto-assign" \
+    -H "Content-Type: application/json" \
+    -d '{}' | jq -r .id)
+fi
+```
+
+### Шаг 5 — ТЗ‑1: Доставить заказ и оставить отзыв
+Важно: при смене статуса передаём `courier_id`, чтобы не “стереть” назначение.
+```bash
+curl -s -X PUT "http://localhost:8080/api/orders/${order_id}/status" \
+  -H "Content-Type: application/json" \
+  -d '{"status":"delivered","courier_id":"'"$assigned_courier_id"'"}' | jq
+
+curl -s -X POST "http://localhost:8080/api/orders/${order_id}/review" \
+  -H "Content-Type: application/json" \
+  -d '{"rating":5,"comment":"быстро и аккуратно"}' | jq
+
+curl -s "http://localhost:8080/api/couriers/${assigned_courier_id}/reviews?limit=10&offset=0" | jq
+```
+
+### Шаг 6 — ТЗ‑5: Проверить аналитику (JSON и CSV)
+```bash
+# Для "живых" цифр используем диапазон, включающий сегодняшнюю дату
+to=$(date -u +%Y-%m-%d 2>/dev/null || date +%Y-%m-%d)
+from=$(date -u -d '30 days ago' +%Y-%m-%d 2>/dev/null || date -u -v-30d +%Y-%m-%d)
+
+curl -s "http://localhost:8080/api/analytics/kpi?from=${from}&to=${to}&group_by=day" | jq
+curl -s "http://localhost:8080/api/analytics/kpi?from=${from}&to=${to}&group_by=day&format=csv" | head
+
+curl -s "http://localhost:8080/api/analytics/couriers?from=${from}&to=${to}&format=csv" | head
+```
+
+### Kafka (опционально: посмотреть события в топиках)
+```bash
+docker exec -i kafka kafka-console-consumer --bootstrap-server kafka:29092 --topic orders --from-beginning --max-messages 5
+docker exec -i kafka kafka-console-consumer --bootstrap-server kafka:29092 --topic couriers --from-beginning --max-messages 5
+```
+
+### Rate limiting (опционально)
+По умолчанию выключен (см. `RATE_LIMIT_ENABLED` в конфиге). Статус:
+```bash
+curl -s http://localhost:8080/api/rate-limit/status | jq
+```
+
+## Код-стайл и качество
+- **Структура**: `handlers → services → db/redis/kafka`, без web-фреймворков (stdlib `net/http`) (`cmd/server/main.go`).
+- **Ошибки**: типизированные ошибки `internal/apperror` + единый маппинг ошибок сервисов в HTTP (убраны `strings.Contains(err.Error())`) (`internal/handlers/error_map.go`).
+- **Контексты**: `context.Context` прокинут через handler → service; DB на `QueryContext/ExecContext/BeginTx` (ключевые сервисы в `internal/services/*`).
+
+## Тесты и покрытие
+- Покрытие: `82%+` (локально фиксировалось `82.5%`).
+- Новые/ключевые тесты:
+  - `internal/handlers/orders_handler_test.go` (создание заказа, review, auto-assign, валидации/ошибки)
+  - `internal/handlers/couriers_handler_test.go` (UpdateCourierStatus, ручное назначение)
+  - `internal/handlers/promo_codes_test.go` (CRUD + валидации промокодов)
+  - `internal/handlers/analytics_test.go` (JSON/CSV, валидация дат/параметров, timeout)
+  - `internal/services/*_test.go` (promo_service, courier_assignment_service, geocoding_service.FirstPos и др.)
+- Проверка:
+  - `go test ./...`
+  - `go test ./... -coverprofile=/tmp/cover.out && go tool cover -func=/tmp/cover.out | tail -n 1`
+
+## Быстрая проверка
+1) `make up && make health` (ожидаем `status=healthy`).
+2) `curl "http://localhost:8080/api/analytics/kpi?from=$(date +%Y-%m-01)&to=$(date +%Y-%m-%d)&group_by=day"` (ожидаем `200` + JSON).
+3) CI/CD: GitHub Actions workflows в `.github/workflows/` (CI + integration + release).
+
+## Troubleshooting (если что-то не поднялось)
+- Проверить, что контейнеры запущены и порты проброшены: `docker compose ps`
+- Посмотреть, что именно не здорово (в ответе `/health` есть статусы `database/redis/kafka`): `curl -i http://localhost:8080/health`
+- Логи приложения: `docker compose logs --tail=200 delivery-app`
+- Логи зависимостей:
+  - Postgres: `docker compose logs --tail=200 postgres`
+  - Kafka: `docker compose logs --tail=200 kafka`
+  - Redis: `docker compose logs --tail=200 redis`
+- Если миграции не применились/данные “битые” (редко): `docker compose down -v && docker compose up -d --build` (удалит volumes с данными)
+

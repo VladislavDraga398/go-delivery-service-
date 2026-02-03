@@ -22,18 +22,25 @@ type Producer struct {
 
 // NewProducer создает новый Kafka producer
 func NewProducer(cfg *config.KafkaConfig, log *logger.Logger) (*Producer, error) {
+	return newProducerWithClient(cfg, log, sarama.NewSyncProducer)
+}
+
+// newProducerWithClient позволяет подменять клиента в тестах.
+func newProducerWithClient(cfg *config.KafkaConfig, log *logger.Logger, clientFactory func([]string, *sarama.Config) (sarama.SyncProducer, error)) (*Producer, error) {
 	config := sarama.NewConfig()
 	config.Producer.RequiredAcks = sarama.WaitForAll       // Ждем подтверждения от всех реплик
 	config.Producer.Retry.Max = 3                          // Максимум 3 попытки
 	config.Producer.Return.Successes = true                // Возвращаем успешные результаты
 	config.Producer.Compression = sarama.CompressionSnappy // Сжатие данных
 
-	producer, err := sarama.NewSyncProducer(cfg.Brokers, config)
+	producer, err := clientFactory(cfg.Brokers, config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Kafka producer: %w", err)
 	}
 
-	log.Info("Kafka producer created successfully")
+	if log != nil {
+		log.Info("Kafka producer created successfully")
+	}
 
 	return &Producer{
 		producer: producer,
@@ -44,6 +51,9 @@ func NewProducer(cfg *config.KafkaConfig, log *logger.Logger) (*Producer, error)
 
 // Close закрывает producer
 func (p *Producer) Close() error {
+	if p == nil || p.producer == nil {
+		return nil
+	}
 	return p.producer.Close()
 }
 

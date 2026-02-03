@@ -38,6 +38,31 @@ KAFKA_TOPIC_LOCATIONS=locations
 LOG_LEVEL=info
 LOG_FORMAT=json
 LOG_FILE=
+
+# Геокодер
+GEOCODER_PROVIDER=offline                # offline | yandex
+YANDEX_GEOCODER_API_KEY=
+YANDEX_GEOCODER_BASE_URL=https://geocode-maps.yandex.ru/1.x
+GEOCODER_TIMEOUT_SECONDS=5
+
+# Тарифы доставки
+PRICING_BASE_FARE=100
+PRICING_PER_KM=20
+PRICING_MIN_FARE=150
+
+# Аналитика
+ANALYTICS_CACHE_TTL_MINUTES=10
+ANALYTICS_MAX_RANGE_DAYS=365
+ANALYTICS_DEFAULT_GROUP_BY=none         # none | day | week | month
+ANALYTICS_DEFAULT_TOP_LIMIT=5
+ANALYTICS_DEFAULT_COURIER_LIMIT=50
+ANALYTICS_REQUEST_TIMEOUT_SECONDS=5
+
+# Rate limiting
+RATE_LIMIT_ENABLED=false
+RATE_LIMIT_REQUESTS=100
+RATE_LIMIT_WINDOW_SECONDS=60
+RATE_LIMIT_KEY_PREFIX=ratelimit
 ```
 
 ## Описание переменных
@@ -73,6 +98,31 @@ LOG_FILE=
 - `LOG_LEVEL` - Уровень логирования: debug, info, warn, error (по умолчанию: info)
 - `LOG_FORMAT` - Формат логов: json, text (по умолчанию: json)
 - `LOG_FILE` - Путь к файлу логов (по умолчанию: пустой, логи выводятся в stdout)
+
+### Геокодер
+- `GEOCODER_PROVIDER` - Провайдер геокодинга: `offline` или `yandex` (по умолчанию: offline)
+- `YANDEX_GEOCODER_API_KEY` - API ключ Яндекс Геокодера (по умолчанию: пусто)
+- `YANDEX_GEOCODER_BASE_URL` - Базовый URL Яндекс Геокодера (по умолчанию: https://geocode-maps.yandex.ru/1.x)
+- `GEOCODER_TIMEOUT_SECONDS` - Таймаут http-запроса к провайдеру в секундах (по умолчанию: 5)
+
+### Тарифы доставки
+- `PRICING_BASE_FARE` - Базовая стоимость доставки (по умолчанию: 100)
+- `PRICING_PER_KM` - Стоимость за километр (по умолчанию: 20)
+- `PRICING_MIN_FARE` - Минимальная стоимость доставки (по умолчанию: 150)
+
+### Аналитика
+- `ANALYTICS_CACHE_TTL_MINUTES` - TTL кеша аналитики в минутах (по умолчанию: 10)
+- `ANALYTICS_MAX_RANGE_DAYS` - Максимальный диапазон дат в запросе аналитики (по умолчанию: 365)
+- `ANALYTICS_DEFAULT_GROUP_BY` - Группировка по умолчанию: `none|day|week|month` (по умолчанию: none)
+- `ANALYTICS_DEFAULT_TOP_LIMIT` - Кол-во top items по умолчанию (по умолчанию: 5)
+- `ANALYTICS_DEFAULT_COURIER_LIMIT` - Лимит курьеров по умолчанию (по умолчанию: 50)
+- `ANALYTICS_REQUEST_TIMEOUT_SECONDS` - Таймаут запроса аналитики (по умолчанию: 5)
+
+### Rate limiting
+- `RATE_LIMIT_ENABLED` - Включить rate limiting (по умолчанию: false)
+- `RATE_LIMIT_REQUESTS` - Лимит запросов на окно (по умолчанию: 100)
+- `RATE_LIMIT_WINDOW_SECONDS` - Длина окна в секундах (по умолчанию: 60)
+- `RATE_LIMIT_KEY_PREFIX` - Префикс ключей в Redis (по умолчанию: ratelimit)
 
 ## Для продакшена
 

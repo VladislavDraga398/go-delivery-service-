@@ -1,0 +1,56 @@
+name: CD (dev → GHCR)
+
+on:
+  push:
+    branches: ["dev"]
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: cd-dev-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  docker:
+    name: Build and push (dev)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute image name
+        id: vars
+        run: |
+          set -e
+          owner="${GITHUB_REPOSITORY%/*}"
+          repo="${GITHUB_REPOSITORY#*/}"
+          owner="${owner,,}"
+          repo="${repo,,}"
+          repo="${repo%-}" # GHCR image names cannot end with '-'
+          echo "image=ghcr.io/${owner}/${repo}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.vars.outputs.image }}
+          tags: |
+            type=raw,value=dev
+            type=sha,format=short,prefix=dev-
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
