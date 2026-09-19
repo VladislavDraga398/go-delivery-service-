@@ -40,7 +40,8 @@ LOG_FORMAT=json
 LOG_FILE=
 
 # Геокодер
-GEOCODER_PROVIDER=offline                # offline | yandex
+GEOCODER_PROVIDER=osm                    # osm (Nominatim) | yandex
+OSM_GEOCODER_BASE_URL=https://nominatim.openstreetmap.org/search
 YANDEX_GEOCODER_API_KEY=
 YANDEX_GEOCODER_BASE_URL=https://geocode-maps.yandex.ru/1.x
 GEOCODER_TIMEOUT_SECONDS=5

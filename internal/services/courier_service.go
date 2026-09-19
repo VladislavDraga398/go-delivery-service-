@@ -198,6 +198,41 @@ func (s *CourierService) GetAvailableCouriers(ctx context.Context) ([]*models.Co
 	return s.GetCouriers(ctx, &status, nil, 0, 0, "created_at")
 }
 
+// GetCouriersForAssignment возвращает курьеров-кандидатов для автоназначения:
+// и свободных, и занятых — загруженность учитывается в скоринге (вес 0.30).
+func (s *CourierService) GetCouriersForAssignment(ctx context.Context) ([]*models.Courier, error) {
+	query := `
+		SELECT id, name, phone, status, current_lat, current_lon, rating, total_reviews,
+		       created_at, updated_at, last_seen_at
+		FROM couriers
+		WHERE status IN ('available', 'busy')
+		  AND current_lat IS NOT NULL AND current_lon IS NOT NULL
+		ORDER BY created_at DESC
+	`
+	rows, err := s.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get couriers for assignment: %w", err)
+	}
+	defer rows.Close()
+
+	var couriers []*models.Courier
+	for rows.Next() {
+		courier := &models.Courier{}
+		if err := rows.Scan(&courier.ID, &courier.Name, &courier.Phone, &courier.Status,
+			&courier.CurrentLat, &courier.CurrentLon, &courier.Rating, &courier.TotalReviews,
+			&courier.CreatedAt, &courier.UpdatedAt, &courier.LastSeenAt); err != nil {
+			return nil, fmt.Errorf("failed to scan courier: %w", err)
+		}
+		couriers = append(couriers, courier)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate couriers: %w", err)
+	}
+
+	return couriers, nil
+}
+
 // AssignOrderToCourier назначает заказ курьеру
 func (s *CourierService) AssignOrderToCourier(ctx context.Context, orderID, courierID uuid.UUID) error {
 	tx, err := s.db.BeginTx(ctx, nil)

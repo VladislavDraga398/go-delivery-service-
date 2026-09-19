@@ -97,10 +97,11 @@ func (h *OrderHandler) CreateOrder(w http.ResponseWriter, r *http.Request) {
 		// Не возвращаем ошибку клиенту
 	}
 
-	// Опциональное автоназначение курьера сразу после создания заказа
+	// Опциональное автоназначение курьера сразу после создания заказа.
+	// По ТЗ расстояние считается от курьера до точки ПОЛУЧЕНИЯ заказа (pickup).
 	var assignedCourier *models.Courier
 	if req.AutoAssign {
-		courier, err := h.assignmentService.AutoAssignCourier(r.Context(), order.ID, *req.DeliveryLat, *req.DeliveryLon)
+		courier, err := h.assignmentService.AutoAssignCourier(r.Context(), order.ID, *req.PickupLat, *req.PickupLon)
 		if err != nil {
 			h.log.WithError(err).WithField("order_id", order.ID).Warn("Auto-assign failed after order creation")
 		} else {
@@ -397,10 +398,11 @@ func (h *OrderHandler) validateCreateOrderRequest(req *models.CreateOrderRequest
 	return nil
 }
 
-// AutoAssignCourierRequest представляет запрос на автоназначение курьера
+// AutoAssignCourierRequest представляет запрос на автоназначение курьера.
+// Координаты опциональны: по умолчанию берётся точка получения (pickup) заказа.
 type AutoAssignCourierRequest struct {
-	DeliveryLat *float64 `json:"delivery_lat,omitempty"`
-	DeliveryLon *float64 `json:"delivery_lon,omitempty"`
+	PickupLat *float64 `json:"pickup_lat,omitempty"`
+	PickupLon *float64 `json:"pickup_lon,omitempty"`
 }
 
 // AutoAssignCourier автоматически назначает оптимального курьера на заказ
@@ -428,40 +430,40 @@ func (h *OrderHandler) AutoAssignCourier(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Определяем координаты доставки: либо из запроса, либо из заказа
+	// Определяем координаты точки получения: либо из запроса, либо из заказа
 	var (
-		deliveryLat float64
-		deliveryLon float64
+		pickupLat float64
+		pickupLon float64
 	)
 
-	if req.DeliveryLat != nil || req.DeliveryLon != nil {
-		if req.DeliveryLat == nil || req.DeliveryLon == nil {
-			writeErrorResponse(w, http.StatusBadRequest, "Both delivery_lat and delivery_lon must be provided")
+	if req.PickupLat != nil || req.PickupLon != nil {
+		if req.PickupLat == nil || req.PickupLon == nil {
+			writeErrorResponse(w, http.StatusBadRequest, "Both pickup_lat and pickup_lon must be provided")
 			return
 		}
-		deliveryLat = *req.DeliveryLat
-		deliveryLon = *req.DeliveryLon
+		pickupLat = *req.PickupLat
+		pickupLon = *req.PickupLon
 	} else {
-		if order.DeliveryLat == nil || order.DeliveryLon == nil {
-			writeErrorResponse(w, http.StatusInternalServerError, "Delivery coordinates are missing for the order")
+		if order.PickupLat == nil || order.PickupLon == nil {
+			writeErrorResponse(w, http.StatusInternalServerError, "Pickup coordinates are missing for the order")
 			return
 		}
-		deliveryLat = *order.DeliveryLat
-		deliveryLon = *order.DeliveryLon
+		pickupLat = *order.PickupLat
+		pickupLon = *order.PickupLon
 	}
 
 	// Валидация координат
-	if deliveryLat < -90 || deliveryLat > 90 {
-		writeErrorResponse(w, http.StatusBadRequest, "Invalid delivery latitude")
+	if pickupLat < -90 || pickupLat > 90 {
+		writeErrorResponse(w, http.StatusBadRequest, "Invalid pickup latitude")
 		return
 	}
-	if deliveryLon < -180 || deliveryLon > 180 {
-		writeErrorResponse(w, http.StatusBadRequest, "Invalid delivery longitude")
+	if pickupLon < -180 || pickupLon > 180 {
+		writeErrorResponse(w, http.StatusBadRequest, "Invalid pickup longitude")
 		return
 	}
 
 	// Автоматическое назначение курьера
-	courier, err := h.assignmentService.AutoAssignCourier(r.Context(), orderID, deliveryLat, deliveryLon)
+	courier, err := h.assignmentService.AutoAssignCourier(r.Context(), orderID, pickupLat, pickupLon)
 	if err != nil {
 		writeServiceError(w, h.log, err, "Failed to auto-assign courier")
 		return

@@ -51,6 +51,9 @@ type AssignmentWeights struct {
 	Workload float64 // по умолчанию 0.30
 }
 
+// maxActiveOrdersPerCourier — ёмкость курьера: сверх этого числа заказов он не кандидат.
+const maxActiveOrdersPerCourier = 5
+
 // DefaultWeights возвращает стандартные веса
 func DefaultWeights() AssignmentWeights {
 	return AssignmentWeights{
@@ -60,8 +63,9 @@ func DefaultWeights() AssignmentWeights {
 	}
 }
 
-// AutoAssignCourier автоматически выбирает и назначает оптимального курьера на заказ
-func (s *CourierAssignmentService) AutoAssignCourier(ctx context.Context, orderID uuid.UUID, deliveryLat, deliveryLon float64) (*models.Courier, error) {
+// AutoAssignCourier автоматически выбирает и назначает оптимального курьера на заказ.
+// Расстояние считается от курьера до точки получения заказа (pickup) — по ТЗ.
+func (s *CourierAssignmentService) AutoAssignCourier(ctx context.Context, orderID uuid.UUID, pickupLat, pickupLon float64) (*models.Courier, error) {
 	// Получаем заказ
 	order, err := s.orderService.GetOrder(ctx, orderID)
 	if err != nil {
@@ -76,19 +80,15 @@ func (s *CourierAssignmentService) AutoAssignCourier(ctx context.Context, orderI
 		return nil, apperror.Conflict("order already has assigned courier", nil)
 	}
 
-	// Получаем доступных курьеров
-	availableCouriers, err := s.courierService.GetAvailableCouriers(ctx)
+	// Получаем курьеров-кандидатов: свободные и занятые (загруженность учитывается в скоринге)
+	candidates, err := s.courierService.GetCouriersForAssignment(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get available couriers: %w", err)
 	}
 
-	if len(availableCouriers) == 0 {
-		return nil, apperror.Conflict("no available couriers found", nil)
-	}
-
-	// Фильтруем курьеров с координатами
+	// Фильтруем курьеров с координатами (offline — исключаем)
 	var couriersWithLocation []*models.Courier
-	for _, c := range availableCouriers {
+	for _, c := range candidates {
 		if c.CurrentLat != nil && c.CurrentLon != nil {
 			couriersWithLocation = append(couriersWithLocation, c)
 		}
@@ -103,8 +103,16 @@ func (s *CourierAssignmentService) AutoAssignCourier(ctx context.Context, orderI
 	scores := make([]CourierScore, 0, len(couriersWithLocation))
 
 	for _, courier := range couriersWithLocation {
-		score := s.calculateCourierScore(ctx, courier, deliveryLat, deliveryLon, weights)
+		score := s.calculateCourierScore(ctx, courier, pickupLat, pickupLon, weights)
+		// Курьер на пределе ёмкости — исключаем из кандидатов
+		if score.ActiveOrders >= maxActiveOrdersPerCourier {
+			continue
+		}
 		scores = append(scores, score)
+	}
+
+	if len(scores) == 0 {
+		return nil, apperror.Conflict("all couriers are at capacity", nil)
 	}
 
 	// Находим курьера с максимальной оценкой
@@ -168,8 +176,7 @@ func (s *CourierAssignmentService) calculateCourierScore(ctx context.Context, co
 	score.ActiveOrders = activeOrders
 
 	// Чем меньше заказов, тем лучше (используем обратную функцию)
-	// Максимальное количество заказов для нормализации: 5
-	maxOrders := 5.0
+	maxOrders := float64(maxActiveOrdersPerCourier)
 	if float64(activeOrders) >= maxOrders {
 		score.WorkloadScore = 0.0
 	} else {

@@ -68,7 +68,8 @@ type LoggerConfig struct {
 
 // GeocodingConfig описывает настройки геокодера
 type GeocodingConfig struct {
-	Provider       string `json:"provider"`        // offline | yandex
+	Provider       string `json:"provider"`        // osm | yandex
+	OSMBaseURL     string `json:"osm_base_url"`    // https://nominatim.openstreetmap.org/search
 	YandexAPIKey   string `json:"yandex_api_key"`  // Ключ для Yandex геокодера
 	YandexBaseURL  string `json:"yandex_base_url"` // https://geocode-maps.yandex.ru/1.x
 	TimeoutSeconds int    `json:"timeout_seconds"` // таймаут http-запроса
@@ -137,7 +138,8 @@ func Load() *Config {
 			File:   getEnv("LOG_FILE", ""),
 		},
 		Geocoding: GeocodingConfig{
-			Provider:       getEnv("GEOCODER_PROVIDER", "offline"),
+			Provider:       getEnv("GEOCODER_PROVIDER", "osm"),
+			OSMBaseURL:     getEnv("OSM_GEOCODER_BASE_URL", "https://nominatim.openstreetmap.org/search"),
 			YandexAPIKey:   getEnv("YANDEX_GEOCODER_API_KEY", ""),
 			YandexBaseURL:  getEnv("YANDEX_GEOCODER_BASE_URL", "https://geocode-maps.yandex.ru/1.x"),
 			TimeoutSeconds: getEnvAsInt("GEOCODER_TIMEOUT_SECONDS", 5),
