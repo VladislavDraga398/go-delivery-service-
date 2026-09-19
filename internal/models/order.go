@@ -66,6 +66,7 @@ type CreateOrderRequest struct {
 	DeliveryLat     *float64                 `json:"delivery_lat,omitempty"`
 	DeliveryLon     *float64                 `json:"delivery_lon,omitempty"`
 	PromoCode       *string                  `json:"promo_code,omitempty"`
+	DeliveryCost    *float64                 `json:"delivery_cost,omitempty"` // ручной override стоимости доставки
 }
 
 // CreateOrderItemRequest представляет запрос на создание товара в заказе

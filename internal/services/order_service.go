@@ -34,11 +34,6 @@ func NewOrderService(db *database.DB, log *logger.Logger, pricing *PricingServic
 
 // CreateOrder создает новый заказ
 func (s *OrderService) CreateOrder(ctx context.Context, req *models.CreateOrderRequest) (*models.Order, error) {
-	// Проверяем, что координаты присутствуют (должны быть после валидации/геокодирования)
-	if req.PickupLat == nil || req.PickupLon == nil || req.DeliveryLat == nil || req.DeliveryLon == nil {
-		return nil, apperror.Validation("pickup and delivery coordinates are required for pricing", nil)
-	}
-
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to begin transaction: %w", err)
@@ -51,9 +46,20 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *models.CreateOrderR
 		itemsTotal += item.Price * float64(item.Quantity)
 	}
 
-	// Расчет стоимости доставки
-	distanceKm := calculateDistance(*req.PickupLat, *req.PickupLon, *req.DeliveryLat, *req.DeliveryLon)
-	deliveryCost := s.pricing.CalculateCost(distanceKm)
+	// Стоимость доставки: ручной override, иначе расчёт по расстоянию
+	var deliveryCost float64
+	if req.DeliveryCost != nil {
+		if *req.DeliveryCost < 0 {
+			return nil, apperror.Validation("delivery_cost cannot be negative", nil)
+		}
+		deliveryCost = round2(*req.DeliveryCost)
+	} else {
+		if req.PickupLat == nil || req.PickupLon == nil || req.DeliveryLat == nil || req.DeliveryLon == nil {
+			return nil, apperror.Validation("pickup and delivery coordinates are required for pricing", nil)
+		}
+		distanceKm := calculateDistance(*req.PickupLat, *req.PickupLon, *req.DeliveryLat, *req.DeliveryLon)
+		deliveryCost = s.pricing.CalculateCost(distanceKm)
+	}
 
 	// Применение промокода, если указан
 	var discountAmount float64

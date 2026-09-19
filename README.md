@@ -130,6 +130,7 @@ curl -X POST http://localhost:8080/api/orders \
   -d '{
     "customer_name": "Анна Смирнова",
     "customer_phone": "+7(999)987-65-43",
+    "pickup_address": "Москва, ул. Производственная, д. 1",
     "delivery_address": "Москва, ул. Ленина, д. 10, кв. 5",
     "items": [
       {"name": "Пицца Маргарита", "quantity": 1, "price": 500.00},
@@ -150,6 +151,7 @@ Content-Type: application/json
 {
   "customer_name": "Имя клиента",
   "customer_phone": "+7(999)123-45-67",
+  "pickup_address": "Адрес забора заказа",
   "delivery_address": "Адрес доставки",
   "items": [
     {
@@ -157,9 +159,16 @@ Content-Type: application/json
       "quantity": 1,
       "price": 100.50
     }
-  ]
+  ],
+  "delivery_cost": 250.00
 }
 ```
+
+`pickup_address` обязателен (нужен для геокодирования и расчёта доставки).
+`delivery_cost` — необязательный ручной override стоимости доставки; если не указан,
+стоимость считается по расстоянию (тарифы `PRICING_*`). Координаты можно передать
+явно (`pickup_lat/pickup_lon`, `delivery_lat/delivery_lon`) — иначе адреса геокодируются
+через Nominatim (OSM) или Яндекс (`GEOCODER_PROVIDER`).
 
 #### Получение заказа
 ```http
@@ -207,7 +216,7 @@ GET /api/couriers?status=available&min_rating=4.5&limit=20&offset=0
 
 #### Получение доступных курьеров
 ```http
-GET /api/couriers/available
+GET /api/couriers/available?min_rating=4.5&order_by=rating
 ```
 
 #### Обновление статуса курьера
@@ -569,13 +578,15 @@ delivery-system/
 
 ### 2) Автоназначение курьера
 - **API**: `POST /api/orders/{id}/auto-assign` + `auto_assign` в `POST /api/orders` (`internal/handlers/orders.go`).
-- **Алгоритм**: scoring по расстоянию/рейтингу/нагрузке (веса `0.40/0.30/0.30`) (`internal/services/courier_assignment_service.go`).
+- **Алгоритм**: scoring по расстоянию/рейтингу/нагрузке (веса `0.40/0.30/0.30`); расстояние считается от курьера до **точки получения (pickup)**; кандидаты — курьеры `available` и `busy`, курьер на пределе ёмкости (5 активных заказов) исключается (`internal/services/courier_assignment_service.go`, `internal/services/courier_service.go`).
 - **Kafka**: при автоназначении и ручном назначении публикуются `courier.assigned` и `order.status_changed` (best effort) (`internal/handlers/orders.go`, `internal/handlers/couriers.go`).
+- **Фильтр по рейтингу**: `GET /api/couriers/available?min_rating=4.5&order_by=rating` (`internal/handlers/couriers.go`).
 
 ### 3) Стоимость доставки и геокодинг
 - **Расчёт**: distance (haversine) → `PricingService.CalculateCost` (base/per_km/min_fare) (`internal/services/pricing_service.go`, `internal/services/order_service.go`).
-- **Геокодер**: `offline` или `yandex` (опционально), кеш в Redis (`internal/services/geocoding_service.go`).
+- **Геокодер**: `osm` (Nominatim, по умолчанию) или `yandex` (опционально, при ошибке fallback на OSM), кеш в Redis (`internal/services/geocoding_service.go`).
 - **Контракт API**: `pickup_address` обязателен при создании заказа (валидация в `internal/handlers/orders.go`).
+- **Override**: ручная стоимость доставки через `delivery_cost` в `POST /api/orders` (`internal/services/order_service.go`).
 
 ### 4) Промокоды и скидки
 - **БД**: `promo_codes` + поля `orders.promo_code/discount_amount` (`migrations/004_promo_codes.up.sql`).

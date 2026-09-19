@@ -24,8 +24,8 @@ type Coordinates struct {
 	Lon float64 `json:"lon"`
 }
 
-// GeocodingService эмулирует геокодер с кешированием в Redis.
-// В продакшене сюда можно подключить внешний API (Yandex/Google) и reuse тот же интерфейс.
+// GeocodingService кеширует координаты адресов в Redis.
+// Провайдеры: Nominatim (OSM, бесплатно) или Yandex (нужен API-ключ).
 type GeocodingService struct {
 	redis  *redis.Client
 	log    *logger.Logger
@@ -69,14 +69,28 @@ func (s *GeocodingService) Geocode(ctx context.Context, address string) (float64
 		err error
 	)
 
-	if strings.EqualFold(s.cfg.Provider, "yandex") && s.cfg.YandexAPIKey != "" {
-		lat, lon, err = s.yandexGeocode(ctx, address)
-		if err != nil {
-			s.log.WithError(err).WithField("address", address).Warn("Yandex geocode failed, fallback to offline")
-			lat, lon = hashToCoordinates(address)
+	switch strings.ToLower(s.cfg.Provider) {
+	case "yandex":
+		if s.cfg.YandexAPIKey == "" {
+			lat, lon, err = s.osmGeocode(ctx, address)
+			if err != nil {
+				return 0, 0, fmt.Errorf("osm geocode failed: %w", err)
+			}
+		} else {
+			lat, lon, err = s.yandexGeocode(ctx, address)
+			if err != nil {
+				s.log.WithError(err).WithField("address", address).Warn("Yandex geocode failed, fallback to OSM")
+				lat, lon, err = s.osmGeocode(ctx, address)
+				if err != nil {
+					return 0, 0, fmt.Errorf("osm geocode failed: %w", err)
+				}
+			}
 		}
-	} else {
-		lat, lon = hashToCoordinates(address)
+	default:
+		lat, lon, err = s.osmGeocode(ctx, address)
+		if err != nil {
+			return 0, 0, fmt.Errorf("osm geocode failed: %w", err)
+		}
 	}
 
 	coords := Coordinates{Lat: lat, Lon: lon}
@@ -172,6 +186,64 @@ func hashToCoordinates(address string) (float64, float64) {
 	lon := -180 + float64((val/18000)%36000)/100.0 // шаг 0.01 градуса
 
 	return lat, lon
+}
+
+// osmGeocode вызывает Nominatim (OpenStreetMap) и возвращает координаты (lat, lon).
+// Публичный сервер требует User-Agent и лимит 1 запрос/сек; результаты кешируются в Redis.
+func (s *GeocodingService) osmGeocode(ctx context.Context, address string) (float64, float64, error) {
+	params := url.Values{}
+	params.Set("q", address)
+	params.Set("format", "json")
+	params.Set("limit", "1")
+
+	endpoint := s.cfg.OSMBaseURL
+	if endpoint == "" {
+		endpoint = "https://nominatim.openstreetmap.org/search"
+	}
+
+	reqURL := endpoint + "?" + params.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to build request: %w", err)
+	}
+	req.Header.Set("User-Agent", "go-delivery-service/1.0 (educational project)")
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to call osm geocode: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return 0, 0, fmt.Errorf("osm geocode returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var results []osmResponse
+	if err := json.NewDecoder(resp.Body).Decode(&results); err != nil {
+		return 0, 0, fmt.Errorf("failed to decode osm geocode response: %w", err)
+	}
+
+	if len(results) == 0 {
+		return 0, 0, fmt.Errorf("osm geocode returned no results for address %q", address)
+	}
+
+	var lat, lon float64
+	if _, err := fmt.Sscanf(results[0].Lat, "%f", &lat); err != nil {
+		return 0, 0, fmt.Errorf("failed to parse osm latitude: %w", err)
+	}
+	if _, err := fmt.Sscanf(results[0].Lon, "%f", &lon); err != nil {
+		return 0, 0, fmt.Errorf("failed to parse osm longitude: %w", err)
+	}
+
+	return lat, lon, nil
+}
+
+// Структура для парсинга Nominatim ответа
+type osmResponse struct {
+	Lat string `json:"lat"`
+	Lon string `json:"lon"`
 }
 
 // hashKey делает короткий ключ для адреса.

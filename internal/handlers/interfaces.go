@@ -21,7 +21,7 @@ type OrderService interface {
 }
 
 type AssignmentService interface {
-	AutoAssignCourier(ctx context.Context, orderID uuid.UUID, deliveryLat, deliveryLon float64) (*models.Courier, error)
+	AutoAssignCourier(ctx context.Context, orderID uuid.UUID, pickupLat, pickupLon float64) (*models.Courier, error)
 }
 
 type GeocodingService interface {

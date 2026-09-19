@@ -171,46 +171,22 @@ func (h *CourierHandler) GetCouriers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	query := r.URL.Query()
-
-	// Парсинг параметров фильтрации
-	var status *models.CourierStatus
-	if statusStr := query.Get("status"); statusStr != "" {
-		s := models.CourierStatus(statusStr)
-		status = &s
-	}
-
-	var minRating *float64
-	if ratingStr := query.Get("min_rating"); ratingStr != "" {
-		if val, err := strconv.ParseFloat(ratingStr, 64); err == nil && val >= 0 && val <= 5 {
-			minRating = &val
-		} else {
-			writeErrorResponse(w, http.StatusBadRequest, "Invalid min_rating")
-			return
-		}
-	}
-
-	// Сортировка (по умолчанию — по дате создания)
-	orderBy := "created_at"
-	if orderByStr := query.Get("order_by"); orderByStr != "" {
-		switch orderByStr {
-		case "created_at", "rating":
-			orderBy = orderByStr
-		default:
-			writeErrorResponse(w, http.StatusBadRequest, "Invalid order_by")
-			return
-		}
+	// Парсинг параметров фильтрации (общие с /api/couriers/available)
+	status, minRating, orderBy, err := parseCourierFilters(r)
+	if err != nil {
+		writeErrorResponse(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	limit := 50 // По умолчанию
-	if limitStr := query.Get("limit"); limitStr != "" {
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
 		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 && l <= 100 {
 			limit = l
 		}
 	}
 
 	offset := 0
-	if offsetStr := query.Get("offset"); offsetStr != "" {
+	if offsetStr := r.URL.Query().Get("offset"); offsetStr != "" {
 		if o, err := strconv.Atoi(offsetStr); err == nil && o >= 0 {
 			offset = o
 		}
@@ -226,14 +202,22 @@ func (h *CourierHandler) GetCouriers(w http.ResponseWriter, r *http.Request) {
 	writeJSONResponse(w, http.StatusOK, couriers)
 }
 
-// GetAvailableCouriers получает список доступных курьеров
+// GetAvailableCouriers получает список доступных курьеров.
+// Поддерживает фильтр min_rating и order_by=rating (по ТЗ: топ-курьеров по рейтингу).
 func (h *CourierHandler) GetAvailableCouriers(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeErrorResponse(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
 
-	couriers, err := h.courierService.GetAvailableCouriers(r.Context())
+	var status models.CourierStatus = models.CourierStatusAvailable
+	_, minRating, orderBy, err := parseCourierFilters(r)
+	if err != nil {
+		writeErrorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	couriers, err := h.courierService.GetCouriers(r.Context(), &status, minRating, 0, 0, orderBy)
 	if err != nil {
 		h.log.WithError(err).Error("Failed to get available couriers")
 		writeErrorResponse(w, http.StatusInternalServerError, "Failed to get available couriers")
@@ -241,6 +225,38 @@ func (h *CourierHandler) GetAvailableCouriers(w http.ResponseWriter, r *http.Req
 	}
 
 	writeJSONResponse(w, http.StatusOK, couriers)
+}
+
+// parseCourierFilters разбирает общие параметры фильтрации/сортировки списка курьеров.
+func parseCourierFilters(r *http.Request) (*models.CourierStatus, *float64, string, error) {
+	query := r.URL.Query()
+
+	var status *models.CourierStatus
+	if statusStr := query.Get("status"); statusStr != "" {
+		s := models.CourierStatus(statusStr)
+		status = &s
+	}
+
+	var minRating *float64
+	if ratingStr := query.Get("min_rating"); ratingStr != "" {
+		val, err := strconv.ParseFloat(ratingStr, 64)
+		if err != nil || val < 0 || val > 5 {
+			return nil, nil, "", fmt.Errorf("invalid min_rating")
+		}
+		minRating = &val
+	}
+
+	orderBy := "created_at"
+	if orderByStr := query.Get("order_by"); orderByStr != "" {
+		switch orderByStr {
+		case "created_at", "rating":
+			orderBy = orderByStr
+		default:
+			return nil, nil, "", fmt.Errorf("invalid order_by")
+		}
+	}
+
+	return status, minRating, orderBy, nil
 }
 
 // GetCourierReviews возвращает отзывы по курьеру

@@ -367,13 +367,13 @@ func TestOrderHandler_AutoAssign_MethodNotAllowed(t *testing.T) {
 
 func TestOrderHandler_AutoAssign(t *testing.T) {
 	orderID := uuid.New()
-	order := &models.Order{ID: orderID, DeliveryLat: floatPtr(2), DeliveryLon: floatPtr(2)}
+	order := &models.Order{ID: orderID, PickupLat: floatPtr(2), PickupLon: floatPtr(2)}
 	log := logger.New(&config.LoggerConfig{Level: "error", Format: "json"})
 	svc := &stubOrderService{order: order}
 	assign := &stubAssignmentService{courier: &models.Courier{ID: uuid.New()}}
 	h := NewOrderHandler(svc, assign, &stubGeocodingService{}, &stubProducer{}, &stubRedis{}, log)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/orders/"+orderID.String()+"/auto-assign", bytes.NewBufferString(`{"delivery_lat":2,"delivery_lon":2}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/orders/"+orderID.String()+"/auto-assign", bytes.NewBufferString(`{"pickup_lat":2,"pickup_lon":2}`))
 	rr := httptest.NewRecorder()
 	h.AutoAssignCourier(rr, req)
 	if rr.Code != http.StatusOK {
@@ -384,11 +384,11 @@ func TestOrderHandler_AutoAssign(t *testing.T) {
 func TestOrderHandler_AutoAssign_Error(t *testing.T) {
 	orderID := uuid.New()
 	log := logger.New(&config.LoggerConfig{Level: "error", Format: "json"})
-	svc := &stubOrderService{order: &models.Order{ID: orderID, DeliveryLat: floatPtr(1), DeliveryLon: floatPtr(2)}}
+	svc := &stubOrderService{order: &models.Order{ID: orderID, PickupLat: floatPtr(1), PickupLon: floatPtr(2)}}
 	assign := &stubAssignmentService{err: fmt.Errorf("assign fail")}
 	h := NewOrderHandler(svc, assign, &stubGeocodingService{}, &stubProducer{}, &stubRedis{}, log)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/orders/"+orderID.String()+"/auto-assign", bytes.NewBufferString(`{"delivery_lat":1,"delivery_lon":2}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/orders/"+orderID.String()+"/auto-assign", bytes.NewBufferString(`{"pickup_lat":1,"pickup_lon":2}`))
 	rr := httptest.NewRecorder()
 	h.AutoAssignCourier(rr, req)
 	if rr.Code != http.StatusInternalServerError {
@@ -415,7 +415,7 @@ func TestOrderHandler_AutoAssign_PartialCoordinates(t *testing.T) {
 	log := logger.New(&config.LoggerConfig{Level: "error", Format: "json"})
 	h := NewOrderHandler(&stubOrderService{order: order}, &stubAssignmentService{}, &stubGeocodingService{}, &stubProducer{}, &stubRedis{}, log)
 
-	body := bytes.NewBufferString(`{"delivery_lat":10}`)
+	body := bytes.NewBufferString(`{"pickup_lat":10}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/orders/"+orderID.String()+"/auto-assign", body)
 	rr := httptest.NewRecorder()
 	h.AutoAssignCourier(rr, req)
